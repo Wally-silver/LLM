@@ -1,31 +1,77 @@
+from __future__ import annotations
+
+import statistics
 import time
-from collections import defaultdict
-from contextlib import contextmanager
+from collections import defaultdict, deque
+from contextlib import asynccontextmanager
+
+import redis.asyncio as redis
 
 
 class Metrics:
-    def __init__(self):
-        self.counters = defaultdict(int)
-        self.latencies_ms: list[int] = []
+    """Sliding-window metrics with optional Redis aggregation."""
 
-    @contextmanager
-    def track_latency(self):
+    def __init__(self, redis_client: redis.Redis | None = None, window_size: int = 1000):
+        self.redis = redis_client
+        self.window_size = window_size
+        self.latencies: dict[str, deque[int]] = defaultdict(lambda: deque(maxlen=window_size))
+        self.requests: dict[str, int] = defaultdict(int)
+        self.errors: dict[str, int] = defaultdict(int)
+
+    @asynccontextmanager
+    async def track(self, endpoint: str):
         start = time.perf_counter()
-        yield
-        elapsed = int((time.perf_counter() - start) * 1000)
-        self.latencies_ms.append(elapsed)
+        self.requests[endpoint] += 1
+        if self.redis:
+            await self.redis.hincrby("metrics:req", endpoint, 1)
+        try:
+            yield
+        except Exception:
+            self.errors[endpoint] += 1
+            if self.redis:
+                await self.redis.hincrby("metrics:err", endpoint, 1)
+            raise
+        finally:
+            elapsed = int((time.perf_counter() - start) * 1000)
+            self.latencies[endpoint].append(elapsed)
 
-    def inc(self, name: str, value: int = 1) -> None:
-        self.counters[name] += value
+    @staticmethod
+    def _percentile(values: list[int], p: float) -> int:
+        if not values:
+            return 0
+        values = sorted(values)
+        index = int((len(values) - 1) * p)
+        return values[index]
 
-    def snapshot(self) -> dict:
-        avg = int(sum(self.latencies_ms) / len(self.latencies_ms)) if self.latencies_ms else 0
-        total = self.counters.get("requests", 0)
-        hits = self.counters.get("cache_hits", 0)
-        hit_rate = (hits / total) if total else 0.0
-        return {
-            "requests": total,
-            "cache_hits": hits,
-            "cache_hit_rate": round(hit_rate, 4),
-            "avg_latency_ms": avg,
-        }
+    def snapshot_local(self) -> dict:
+        out = {}
+        for endpoint, vals in self.latencies.items():
+            arr = list(vals)
+            req = self.requests.get(endpoint, 0)
+            err = self.errors.get(endpoint, 0)
+            out[endpoint] = {
+                "requests": req,
+                "errors": err,
+                "error_rate": round((err / req), 4) if req else 0.0,
+                "avg_ms": int(statistics.fmean(arr)) if arr else 0,
+                "p95_ms": self._percentile(arr, 0.95),
+                "p99_ms": self._percentile(arr, 0.99),
+            }
+        return out
+
+    async def snapshot(self) -> dict:
+        local = self.snapshot_local()
+        if not self.redis:
+            return {"local": local}
+        req = await self.redis.hgetall("metrics:req")
+        err = await self.redis.hgetall("metrics:err")
+        aggregate = {}
+        for endpoint, total_req in req.items():
+            total_req_i = int(total_req)
+            total_err_i = int(err.get(endpoint, 0))
+            aggregate[endpoint] = {
+                "requests": total_req_i,
+                "errors": total_err_i,
+                "error_rate": round((total_err_i / total_req_i), 4) if total_req_i else 0.0,
+            }
+        return {"local": local, "aggregate": aggregate}

@@ -1,20 +1,14 @@
-"""LangGraph-based agent orchestration.
+from __future__ import annotations
 
-节点定义：
-- Planner：决定是否调用工具
-- Tool Executor：执行工具
-- Retriever：调用 RAG
-- Generator：调用 LLM 生成最终答案
-"""
-
+import json
 from typing import TypedDict
 
 from langgraph.graph import END, StateGraph
 
+from app.services.prompting import extract_json
+
 
 class AgentState(TypedDict, total=False):
-    """Agent 在图执行过程中的共享状态。"""
-
     query: str
     rewritten_query: str
     selected_tool: str
@@ -24,17 +18,15 @@ class AgentState(TypedDict, total=False):
 
 
 class AgentOrchestrator:
-    """封装 StateGraph 的编排器。"""
-
-    def __init__(self, tool_selector, tool_executor, retriever, generator):
+    def __init__(self, tool_selector, tool_executor, retriever, generator, planner_llm=None):
         self.tool_selector = tool_selector
         self.tool_executor = tool_executor
         self.retriever = retriever
         self.generator = generator
+        self.planner_llm = planner_llm
         self.graph = self._build_graph()
 
     def _build_graph(self):
-        """构建有向状态图。"""
         g = StateGraph(AgentState)
         g.add_node("planner", self.planner)
         g.add_node("tool_executor", self.execute_tool)
@@ -42,7 +34,6 @@ class AgentOrchestrator:
         g.add_node("generator", self.generate)
 
         g.set_entry_point("planner")
-        # Planner 根据意图决定流程分支。
         g.add_conditional_edges(
             "planner",
             lambda s: "tool_executor" if s.get("selected_tool") else "retriever",
@@ -54,27 +45,36 @@ class AgentOrchestrator:
         return g.compile()
 
     async def planner(self, state: AgentState):
-        """规划节点：选择工具。"""
-        tool = await self.tool_selector(state["query"])
-        return {"selected_tool": tool, "rewritten_query": state["query"]}
+        if self.planner_llm is None:
+            tool = await self.tool_selector(state["query"])
+            return {"selected_tool": tool, "rewritten_query": state["query"]}
+
+        prompt = (
+            "你是planner。根据用户问题选择工具。"
+            "只输出JSON: {\"tool\": string|null, \"rewritten_query\": string}.\n"
+            f"用户问题: {state['query']}"
+        )
+        raw = await self.planner_llm.complete("You are a strict JSON planner.", prompt, stream=False, max_tokens=200)
+        parsed = extract_json(raw)
+        tool = parsed.get("tool")
+        if tool and not isinstance(tool, str):
+            tool = None
+        rewritten = parsed.get("rewritten_query") or state["query"]
+        return {"selected_tool": tool, "rewritten_query": rewritten}
 
     async def execute_tool(self, state: AgentState):
-        """工具执行节点。"""
         if not state.get("selected_tool"):
             return {}
-        result = await self.tool_executor(state["selected_tool"], query=state["query"])
+        result = await self.tool_executor(state["selected_tool"], query=state.get("rewritten_query", state["query"]))
         return {"tool_result": result}
 
     async def retrieve(self, state: AgentState):
-        """检索节点：获取用于生成的上下文。"""
-        context = await self.retriever(state["query"])
+        context = await self.retriever(state.get("rewritten_query", state["query"]))
         return {"context": context}
 
     async def generate(self, state: AgentState):
-        """生成节点：调用 LLM。"""
         answer = await self.generator(state)
         return {"answer": answer}
 
     async def run(self, query: str) -> AgentState:
-        """执行完整图流程。"""
         return await self.graph.ainvoke({"query": query})

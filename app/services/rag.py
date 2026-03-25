@@ -1,32 +1,33 @@
-"""Retrieval-Augmented Generation (RAG) service.
+from __future__ import annotations
 
-职责：
-- 文本 chunk 切分（默认约 512 token 的词粒度近似）
-- embedding 编码并构建向量检索索引
-- top-k 初筛 + cross-encoder 精排
-- query rewrite 预处理
-"""
-
+import asyncio
 from dataclasses import dataclass
+from importlib.util import find_spec
+from typing import Any
 
 
 @dataclass
 class DocumentChunk:
-    """知识块结构。"""
-
     doc_id: str
     text: str
+    metadata: dict[str, Any]
+
+
+@dataclass
+class RAGSnapshot:
+    chunks: list[DocumentChunk]
+    index: Any
+    emb_matrix: Any
 
 
 class RAGService:
-    """可独立复用的 RAG 组件。"""
-
     def __init__(
         self,
         embedding_model: str,
         rerank_model: str,
         chunk_token_size: int = 512,
         top_k: int = 5,
+        chunk_overlap: int = 64,
         embedder=None,
         reranker=None,
     ):
@@ -35,13 +36,12 @@ class RAGService:
         self.embedder = embedder
         self.reranker = reranker
         self.chunk_token_size = chunk_token_size
+        self.chunk_overlap = chunk_overlap
         self.top_k = top_k
-        self.chunks: list[DocumentChunk] = []
-        self.index = None
-        self._emb_matrix = None
+        self._snapshot = RAGSnapshot(chunks=[], index=None, emb_matrix=None)
+        self._rw_lock = asyncio.Lock()
 
     def _ensure_models(self):
-        """延迟加载模型，避免应用启动时就拉起大模型占用资源。"""
         if self.embedder is None:
             from sentence_transformers import SentenceTransformer
 
@@ -53,82 +53,97 @@ class RAGService:
 
     @staticmethod
     def query_rewrite(query: str) -> str:
-        """轻量 query rewrite，可扩展为 LLM rewrite 或规则库。"""
+        # 可替换为更强的 rewrite LLM 链路
         return query.strip().replace("这个", "该问题").replace("它", "目标对象")
 
     def chunk_text(self, text: str, doc_id: str) -> list[DocumentChunk]:
-        """按近似 token 长度切块。
-
-        当前用空格分词近似 token 切分，便于演示；
-        生产中可替换为 tiktoken / tokenizer 的精确 token 计数切分。
-        """
-        words = text.split()
-        if not words:
+        if not text.strip():
             return []
-        stride = self.chunk_token_size
-        chunks = []
-        for i in range(0, len(words), stride):
-            chunk = " ".join(words[i : i + stride])
-            chunks.append(DocumentChunk(doc_id=doc_id, text=chunk))
-        return chunks
+        overlap = self.chunk_overlap if self.chunk_overlap < self.chunk_token_size else 0
+        if find_spec("tiktoken") is not None:
+            import tiktoken
 
-    def build_index(self, docs: list[tuple[str, str]]) -> None:
-        """构建索引：支持 FAISS（优先）与 numpy fallback。"""
-        all_chunks: list[DocumentChunk] = []
-        for doc_id, text in docs:
-            all_chunks.extend(self.chunk_text(text, doc_id))
-        if not all_chunks:
-            self.index = None
-            self._emb_matrix = None
-            self.chunks = []
-            return
+            enc = tiktoken.get_encoding("cl100k_base")
+            tokens = enc.encode(text)
+            step = max(1, self.chunk_token_size - overlap)
+            out: list[DocumentChunk] = []
+            for i in range(0, len(tokens), step):
+                segment = tokens[i : i + self.chunk_token_size]
+                if not segment:
+                    break
+                decoded = enc.decode(segment)
+                out.append(DocumentChunk(doc_id=doc_id, text=decoded, metadata={"start_token": i}))
+            return out
 
+        words = text.split()
+        step = max(1, self.chunk_token_size - overlap)
+        out = []
+        for i in range(0, len(words), step):
+            chunk_words = words[i : i + self.chunk_token_size]
+            if not chunk_words:
+                break
+            out.append(DocumentChunk(doc_id=doc_id, text=" ".join(chunk_words), metadata={"start_word": i}))
+        return out
+
+    def _build_snapshot_sync(self, docs: list[tuple[str, str]]) -> RAGSnapshot:
         self._ensure_models()
-        embeddings = self.embedder.encode([c.text for c in all_chunks], normalize_embeddings=True)
+        chunks: list[DocumentChunk] = []
+        for doc_id, text in docs:
+            chunks.extend(self.chunk_text(text, doc_id))
+        if not chunks:
+            return RAGSnapshot(chunks=[], index=None, emb_matrix=None)
+
         import numpy as np
 
+        embeddings = self.embedder.encode([c.text for c in chunks], normalize_embeddings=True)
         emb = np.asarray(embeddings, dtype="float32")
-
-        # 优先使用 FAISS；缺失时回退为 numpy 点积检索，保证最小可运行。
-        from importlib.util import find_spec
-
         if find_spec("faiss") is not None:
             import faiss
 
-            self.index = faiss.IndexFlatIP(emb.shape[1])
-            self.index.add(emb)
-            self._emb_matrix = None
-        else:
-            self.index = None
-            self._emb_matrix = emb
+            index = faiss.IndexFlatIP(emb.shape[1])
+            index.add(emb)
+            return RAGSnapshot(chunks=chunks, index=index, emb_matrix=None)
+        return RAGSnapshot(chunks=chunks, index=None, emb_matrix=emb)
 
-        self.chunks = all_chunks
+    async def build_index(self, docs: list[tuple[str, str]]) -> None:
+        """Hot-reloadable index build (atomic snapshot swap)."""
+        snapshot = await asyncio.to_thread(self._build_snapshot_sync, docs)
+        async with self._rw_lock:
+            self._snapshot = snapshot
 
-    def retrieve(self, query: str, top_k: int | None = None) -> list[DocumentChunk]:
-        """检索主流程：rewrite -> 向量召回 -> rerank。"""
-        if (self.index is None and self._emb_matrix is None) or not self.chunks:
+    async def retrieve(self, query: str, top_k: int | None = None) -> list[DocumentChunk]:
+        async with self._rw_lock:
+            snapshot = self._snapshot
+        if not snapshot.chunks:
             return []
+
+        return await asyncio.to_thread(self._retrieve_sync, snapshot, query, top_k)
+
+    def _retrieve_sync(self, snapshot: RAGSnapshot, query: str, top_k: int | None) -> list[DocumentChunk]:
         self._ensure_models()
+        import numpy as np
+
         k = top_k or self.top_k
         rewritten = self.query_rewrite(query)
         q = self.embedder.encode([rewritten], normalize_embeddings=True)
-        import numpy as np
-
         qv = np.asarray(q, dtype="float32")
 
-        if self.index is not None:
-            _, indices = self.index.search(qv, k)
-            candidates = [self.chunks[i] for i in indices[0] if i >= 0]
+        if snapshot.index is not None:
+            _, indices = snapshot.index.search(qv, k)
+            candidates = [snapshot.chunks[i] for i in indices[0] if i >= 0]
         else:
-            # fallback：直接做向量点积并按分值排序。
-            sims = (self._emb_matrix @ qv[0]).tolist()
+            sims = (snapshot.emb_matrix @ qv[0]).tolist()
             order = sorted(range(len(sims)), key=lambda i: sims[i], reverse=True)[:k]
-            candidates = [self.chunks[i] for i in order]
+            candidates = [snapshot.chunks[i] for i in order]
 
         if not candidates:
             return []
-
         pairs = [(rewritten, c.text) for c in candidates]
         scores = self.reranker.predict(pairs)
         ranked = sorted(zip(candidates, scores), key=lambda x: x[1], reverse=True)
-        return [item[0] for item in ranked]
+        out: list[DocumentChunk] = []
+        for chunk, score in ranked:
+            meta = dict(chunk.metadata)
+            meta["rerank_score"] = float(score)
+            out.append(DocumentChunk(doc_id=chunk.doc_id, text=chunk.text, metadata=meta))
+        return out

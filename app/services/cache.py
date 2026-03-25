@@ -1,21 +1,50 @@
+from __future__ import annotations
+
+import hashlib
 import json
+import random
 from typing import Any
 
 import redis.asyncio as redis
 
 
 class CacheService:
-    def __init__(self, redis_url: str, ttl_seconds: int = 3600):
-        self.client = redis.from_url(redis_url, encoding="utf-8", decode_responses=True)
+    def __init__(self, redis_client: redis.Redis, ttl_seconds: int = 3600, jitter_seconds: int = 300, lock_seconds: int = 15):
+        self.client = redis_client
         self.ttl_seconds = ttl_seconds
+        self.jitter_seconds = jitter_seconds
+        self.lock_seconds = lock_seconds
 
     @staticmethod
-    def _key(session_id: str, query: str) -> str:
-        return f"agent:{session_id}:{query.strip().lower()}"
+    def _hash_text(text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-    async def get(self, session_id: str, query: str) -> dict[str, Any] | None:
-        value = await self.client.get(self._key(session_id, query))
-        return json.loads(value) if value else None
+    def _key(self, session_id: str, query: str, history_fingerprint: str = "") -> str:
+        digest = self._hash_text(f"{session_id}|{query.strip().lower()}|{history_fingerprint}")
+        return f"cache:{digest}"
 
-    async def set(self, session_id: str, query: str, data: dict[str, Any]) -> None:
-        await self.client.set(self._key(session_id, query), json.dumps(data), ex=self.ttl_seconds)
+    def _lock_key(self, key: str) -> str:
+        return f"{key}:lock"
+
+    async def get(self, session_id: str, query: str, history_fingerprint: str = "") -> dict[str, Any] | None:
+        value = await self.client.get(self._key(session_id, query, history_fingerprint))
+        if value is None:
+            return None
+        data = json.loads(value)
+        if data.get("_null"):
+            return None
+        return data
+
+    async def set(self, session_id: str, query: str, data: dict[str, Any] | None, history_fingerprint: str = "") -> None:
+        key = self._key(session_id, query, history_fingerprint)
+        ttl = self.ttl_seconds + random.randint(0, max(0, self.jitter_seconds))
+        payload = data if data is not None else {"_null": True}
+        await self.client.set(key, json.dumps(payload, ensure_ascii=False), ex=ttl)
+
+    async def acquire_lock(self, session_id: str, query: str, history_fingerprint: str = "") -> bool:
+        key = self._key(session_id, query, history_fingerprint)
+        return bool(await self.client.set(self._lock_key(key), "1", ex=self.lock_seconds, nx=True))
+
+    async def release_lock(self, session_id: str, query: str, history_fingerprint: str = "") -> None:
+        key = self._key(session_id, query, history_fingerprint)
+        await self.client.delete(self._lock_key(key))
