@@ -10,7 +10,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.config import settings
-from app.schemas import AgentRequest, AskRequest, StructuredAnswer
+from app.schemas import AgentRequest, AskRequest, IngestSourceRequest, SourceInfo, StructuredAnswer
 from app.services.agent_graph import AgentOrchestrator
 from app.services.cache import CacheService
 from app.services.llm_client import VLLMOpenAIClient
@@ -19,6 +19,7 @@ from app.services.metrics import Metrics
 from app.services.prompting import SYSTEM_PROMPT, build_user_prompt, extract_json, history_fingerprint
 from app.services.rag import RAGService
 from app.services.tools import Tool, ToolRegistry
+from app.services.datasource import DataSourceService
 
 
 @asynccontextmanager
@@ -48,7 +49,9 @@ async def lifespan(app: FastAPI):
         chunk_overlap=settings.chunk_overlap,
         top_k=settings.rag_top_k,
     )
+    datasource = DataSourceService(http_client, max_chars=settings.datasource_max_chars)
     tools = ToolRegistry()
+    docs_store: dict[str, dict] = {}
 
     async def weather_tool(**kwargs):
         city = kwargs.get("query", "unknown")
@@ -62,13 +65,18 @@ async def lifespan(app: FastAPI):
     tools.register(Tool(name="weather", description="Get weather info", handler=weather_tool))
     tools.register(Tool(name="rag_search", description="Semantic retrieve internal knowledge", handler=rag_tool))
 
-    # 初始索引，可通过后台任务热更新
-    await rag.build_index(
-        [
-            ("doc-1", "RAG combines retrieval and generation to reduce hallucination and improve factuality."),
-            ("doc-2", "vLLM improves throughput via paged KV cache and continuous batching."),
-        ]
-    )
+    # 初始数据源示例，可通过 /datasources/ingest 动态注入并热更新索引
+    docs_store["doc-1"] = {
+        "text": "RAG combines retrieval and generation to reduce hallucination and improve factuality.",
+        "source_type": "inline",
+        "source_value": "bootstrap",
+    }
+    docs_store["doc-2"] = {
+        "text": "vLLM improves throughput via paged KV cache and continuous batching.",
+        "source_type": "inline",
+        "source_value": "bootstrap",
+    }
+    await rag.build_index([(k, v["text"]) for k, v in docs_store.items()])
 
     async def select_tool(query: str) -> str | None:
         q = query.lower()
@@ -109,6 +117,8 @@ async def lifespan(app: FastAPI):
     app.state.metrics = metrics
     app.state.llm = llm
     app.state.rag = rag
+    app.state.datasource = datasource
+    app.state.docs_store = docs_store
     app.state.tools = tools
     app.state.agent = agent
 
@@ -120,12 +130,7 @@ async def lifespan(app: FastAPI):
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=3600)
             except asyncio.TimeoutError:
-                await rag.build_index(
-                    [
-                        ("doc-1", "RAG combines retrieval and generation to reduce hallucination and improve factuality."),
-                        ("doc-2", "vLLM improves throughput via paged KV cache and continuous batching."),
-                    ]
-                )
+                await rag.build_index([(k, v["text"]) for k, v in docs_store.items()])
 
     task = asyncio.create_task(periodic_rebuild())
     try:
@@ -164,6 +169,14 @@ def get_agent(request: Request) -> AgentOrchestrator:
     return request.app.state.agent
 
 
+def get_datasource(request: Request) -> DataSourceService:
+    return request.app.state.datasource
+
+
+def get_docs_store(request: Request) -> dict:
+    return request.app.state.docs_store
+
+
 @app.get("/health")
 async def health(metrics: Metrics = Depends(get_metrics)):
     return {"status": "ok", "metrics": await metrics.snapshot()}
@@ -173,6 +186,31 @@ async def health(metrics: Metrics = Depends(get_metrics)):
 async def rebuild_rag(docs: list[tuple[str, str]], rag: RAGService = Depends(get_rag)):
     await rag.build_index(docs)
     return {"ok": True, "docs": len(docs)}
+
+
+@app.get("/datasources", response_model=list[SourceInfo])
+async def list_datasources(docs_store: dict = Depends(get_docs_store)):
+    return [
+        SourceInfo(doc_id=doc_id, source_type=v["source_type"], source_value=v["source_value"])
+        for doc_id, v in docs_store.items()
+    ]
+
+
+@app.post("/datasources/ingest")
+async def ingest_datasource(
+    req: IngestSourceRequest,
+    datasource: DataSourceService = Depends(get_datasource),
+    docs_store: dict = Depends(get_docs_store),
+    rag: RAGService = Depends(get_rag),
+):
+    doc = await datasource.load(req.source_type, req.source_value, doc_id=req.doc_id)
+    docs_store[doc.doc_id] = {
+        "text": doc.text,
+        "source_type": doc.source_type,
+        "source_value": doc.source_value,
+    }
+    await rag.build_index([(k, v["text"]) for k, v in docs_store.items()])
+    return {"ok": True, "doc_id": doc.doc_id, "total_docs": len(docs_store)}
 
 
 async def _non_stream_answer(req: AskRequest, memory: SessionMemory, cache: CacheService, llm: VLLMOpenAIClient, rag: RAGService):

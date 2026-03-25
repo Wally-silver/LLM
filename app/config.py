@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     llm_max_retries: int = 3
     llm_default_max_tokens: int = 1024
 
+    # Datasource
+    datasource_max_chars: int = 2_000_000
+
     # Metrics
     metrics_window_size: int = 1000
 
