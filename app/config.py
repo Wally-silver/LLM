@@ -20,10 +20,11 @@ class Settings(BaseSettings):
     chunk_overlap: int = 64
     rag_top_k: int = 5
 
-    # LLM
-    openai_compatible_base_url: str = "http://localhost:8001/v1"
+    # LLM (Windows-friendly defaults: Ollama)
+    llm_provider: str = "ollama"  # ollama | openai_compatible
+    openai_compatible_base_url: str = "http://localhost:11434"
     openai_api_key: str = "EMPTY"
-    llm_model_name: str = "Qwen/Qwen2.5-7B-Instruct"
+    llm_model_name: str = "qwen2.5:7b-instruct"
     llm_timeout_seconds: int = 90
     llm_max_retries: int = 3
     llm_default_max_tokens: int = 1024

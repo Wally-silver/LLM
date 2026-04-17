@@ -1,63 +1,62 @@
-# Industrial AI Agent (FastAPI + RAG + vLLM + LangGraph)
+# Industrial AI Agent (Windows-ready)
 
-## 功能概览
-- **FastAPI API层**：`/ask`（支持流式与非流式），`/agent`（LangGraph Agent执行）。
-- **异步并发**：端到端 `async/await`。
-- **RAG模块**：SentenceTransformer embedding + FAISS向量检索 + CrossEncoder精排 + query rewrite。
-- **推理层**：通过OpenAI兼容协议调用vLLM，支持 `stream=True`。
-- **Agent状态机**：Planner / Tool Executor / Retriever / Generator（ReAct风格）。
-- **Tool Calling**：可注册工具（天气、RAG检索示例）。
-- **Memory模块**：session级对话记忆，支持拼接历史（可扩展Redis）。
-- **Redis缓存**：query结果缓存，TTL默认1小时。
-- **结构化输出**：JSON约束与恢复。
-- **评估监控**：记录请求延迟与缓存命中率。
-- **可部署**：提供Dockerfile与K8s清单示例。
+## 现在可在 Windows 本地运行（无需 vLLM）
+默认 LLM 提供者已改为 **Ollama**：
+- `LLM_PROVIDER=ollama`
+- `OPENAI_COMPATIBLE_BASE_URL=http://localhost:11434`
+- 默认模型：`qwen2.5:7b-instruct`
 
-## 架构
+> 仍兼容 OpenAI/vLLM：把 `LLM_PROVIDER` 改为 `openai_compatible` 即可。
 
-```text
-Client
-  -> FastAPI (/ask, /agent)
-       -> Cache (Redis)
-       -> Memory (Session)
-       -> Agent (LangGraph)
-            Planner -> Tool Executor -> Retriever(RAG) -> LLM Generator(vLLM)
-       -> Metrics
-```
+---
 
-## 快速启动
+## 快速启动（Windows PowerShell）
 
-```bash
+```powershell
+# 1) 安装并启动 Ollama（先在官网安装）
+ollama pull qwen2.5:7b-instruct
+
+# 2) 安装依赖
 pip install -e .
-uvicorn app.main:app --reload --port 8080
+
+# 3) 启动服务
+uvicorn app.main:app --host 0.0.0.0 --port 8080
 ```
 
-## 启动vLLM（示例）
+---
 
+## API
+- `POST /ask`
+- `POST /agent`
+- `GET /health`
+- `GET /datasources`
+- `POST /datasources/ingest`
+- `POST /datasources/bootstrap/windows-it-admin`
+- `GET /tasks/windows-it-admin`
+- `POST /rag/rebuild`
+
+---
+
+## 已内置真实 RAG 领域：Windows IT 管理
+
+### 文档来源（Microsoft Learn）
+1. WinGet 使用指南：
+   - https://learn.microsoft.com/en-us/windows/package-manager/winget/
+2. PowerShell 执行策略：
+   - https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_execution_policies
+3. `sc.exe create`：
+   - https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/sc-create
+4. `netsh wlan`：
+   - https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/netsh-wlan
+
+### 一键导入该领域文档
 ```bash
-python -m vllm.entrypoints.openai.api_server \
-  --model Qwen/Qwen2.5-7B-Instruct \
-  --host 0.0.0.0 --port 8001
+curl -X POST http://127.0.0.1:8080/datasources/bootstrap/windows-it-admin
 ```
 
-vLLM默认利用KV Cache与continuous batching提升吞吐。
+### 3~4 个具体任务（可直接问 `/ask` 或 `/agent`）
+1. 使用 winget 安装/升级/卸载 VS Code。
+2. 排查并修复 PowerShell 执行策略导致脚本无法运行。
+3. 使用 `sc.exe` 创建/查询/配置/删除 Windows 服务。
+4. 使用 `netsh wlan` 做 Wi-Fi 配置导出与故障诊断。
 
-## API示例
-
-```bash
-curl -X POST http://127.0.0.1:8080/ask \
-  -H 'Content-Type: application/json' \
-  -d '{"session_id":"s1","query":"RAG如何降低幻觉？","stream":false}'
-```
-
-```bash
-curl -N -X POST http://127.0.0.1:8080/ask \
-  -H 'Content-Type: application/json' \
-  -d '{"session_id":"s1","query":"请流式输出","stream":true}'
-```
-
-```bash
-curl -X POST http://127.0.0.1:8080/agent \
-  -H 'Content-Type: application/json' \
-  -d '{"session_id":"s1","query":"帮我查天气并结合知识库回答"}'
-```

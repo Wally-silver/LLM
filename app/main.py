@@ -20,6 +20,7 @@ from app.services.prompting import SYSTEM_PROMPT, build_user_prompt, extract_jso
 from app.services.rag import RAGService
 from app.services.tools import Tool, ToolRegistry
 from app.services.datasource import DataSourceService
+from app.domain.windows_it_admin import WINDOWS_IT_ADMIN_SOURCES, WINDOWS_IT_ADMIN_TASKS
 
 
 @asynccontextmanager
@@ -41,6 +42,7 @@ async def lifespan(app: FastAPI):
         settings.llm_model_name,
         http_client,
         max_retries=settings.llm_max_retries,
+        provider=settings.llm_provider,
     )
     rag = RAGService(
         settings.embedding_model,
@@ -194,6 +196,31 @@ async def list_datasources(docs_store: dict = Depends(get_docs_store)):
         SourceInfo(doc_id=doc_id, source_type=v["source_type"], source_value=v["source_value"])
         for doc_id, v in docs_store.items()
     ]
+
+
+@app.post("/datasources/bootstrap/windows-it-admin")
+async def bootstrap_windows_it_admin(
+    datasource: DataSourceService = Depends(get_datasource),
+    docs_store: dict = Depends(get_docs_store),
+    rag: RAGService = Depends(get_rag),
+):
+    loaded = []
+    for item in WINDOWS_IT_ADMIN_SOURCES:
+        doc = await datasource.load(item["source_type"], item["source_value"], doc_id=item["doc_id"])
+        docs_store[doc.doc_id] = {
+            "text": doc.text,
+            "source_type": doc.source_type,
+            "source_value": doc.source_value,
+            "task_tags": item.get("task_tags", []),
+        }
+        loaded.append(doc.doc_id)
+    await rag.build_index([(k, v["text"]) for k, v in docs_store.items()])
+    return {"ok": True, "loaded_docs": loaded, "tasks": WINDOWS_IT_ADMIN_TASKS}
+
+
+@app.get("/tasks/windows-it-admin")
+async def windows_it_admin_tasks():
+    return {"domain": "windows-it-admin", "tasks": WINDOWS_IT_ADMIN_TASKS}
 
 
 @app.post("/datasources/ingest")
