@@ -1,80 +1,70 @@
 from __future__ import annotations
 
-import json
 from typing import TypedDict
 
-from langgraph.graph import END, StateGraph
-
-from app.services.prompting import extract_json
+from app.services.agent_schema import CriticResult, Plan
 
 
 class AgentState(TypedDict, total=False):
-    query: str
-    rewritten_query: str
-    selected_tool: str
-    tool_result: dict
-    context: str
-    answer: str
+    task: str
+    plan: dict
+    current_step: int
+    history: list[dict]
+    shared: dict
+    status: str
+    retry_count: int
+    max_reflections: int
 
 
 class AgentOrchestrator:
-    def __init__(self, tool_selector, tool_executor, retriever, generator, planner_llm=None):
-        self.tool_selector = tool_selector
-        self.tool_executor = tool_executor
-        self.retriever = retriever
-        self.generator = generator
-        self.planner_llm = planner_llm
-        self.graph = self._build_graph()
+    """State-driven orchestrator (planner -> executor -> critic) without hard framework dependency."""
 
-    def _build_graph(self):
-        g = StateGraph(AgentState)
-        g.add_node("planner", self.planner)
-        g.add_node("tool_executor", self.execute_tool)
-        g.add_node("retriever", self.retrieve)
-        g.add_node("generator", self.generate)
+    def __init__(self, planner, executor, critic):
+        self.planner_fn = planner
+        self.executor_fn = executor
+        self.critic_fn = critic
 
-        g.set_entry_point("planner")
-        g.add_conditional_edges(
-            "planner",
-            lambda s: "tool_executor" if s.get("selected_tool") else "retriever",
-            {"tool_executor": "tool_executor", "retriever": "retriever"},
-        )
-        g.add_edge("tool_executor", "retriever")
-        g.add_edge("retriever", "generator")
-        g.add_edge("generator", END)
-        return g.compile()
+    async def run(self, task: str, max_reflections: int = 2) -> AgentState:
+        state: AgentState = {
+            "task": task,
+            "history": [],
+            "shared": {},
+            "status": "running",
+            "current_step": 1,
+            "retry_count": 0,
+            "max_reflections": max_reflections,
+        }
 
-    async def planner(self, state: AgentState):
-        if self.planner_llm is None:
-            tool = await self.tool_selector(state["query"])
-            return {"selected_tool": tool, "rewritten_query": state["query"]}
+        plan: Plan = await self.planner_fn(task)
+        state["plan"] = plan.to_dict()
+        if not plan.steps:
+            state["status"] = "failed"
+            return state
 
-        prompt = (
-            "你是planner。根据用户问题选择工具。"
-            "只输出JSON: {\"tool\": string|null, \"rewritten_query\": string}.\n"
-            f"用户问题: {state['query']}"
-        )
-        raw = await self.planner_llm.complete("You are a strict JSON planner.", prompt, stream=False, max_tokens=200)
-        parsed = extract_json(raw)
-        tool = parsed.get("tool")
-        if tool and not isinstance(tool, str):
-            tool = None
-        rewritten = parsed.get("rewritten_query") or state["query"]
-        return {"selected_tool": tool, "rewritten_query": rewritten}
+        while state["status"] == "running":
+            current = state["current_step"]
+            step = next((s for s in plan.steps if s.id == current), None)
+            if step is None:
+                state["status"] = "done"
+                break
 
-    async def execute_tool(self, state: AgentState):
-        if not state.get("selected_tool"):
-            return {}
-        result = await self.tool_executor(state["selected_tool"], query=state.get("rewritten_query", state["query"]))
-        return {"tool_result": result}
+            result = await self.executor_fn(step=step, state=state)
+            state["history"].append(
+                {
+                    "step": {"id": step.id, "action": step.action, "tool_call": {"tool": step.tool_call.tool, "args": step.tool_call.args}},
+                    "result": result,
+                }
+            )
+            critic: CriticResult = await self.critic_fn(step=step, result=result, state=state)
+            state["history"][-1]["critic"] = critic.to_dict()
 
-    async def retrieve(self, state: AgentState):
-        context = await self.retriever(state.get("rewritten_query", state["query"]))
-        return {"context": context}
+            if critic.needs_revision and state["retry_count"] < state["max_reflections"]:
+                state["retry_count"] += 1
+                continue
 
-    async def generate(self, state: AgentState):
-        answer = await self.generator(state)
-        return {"answer": answer}
+            state["retry_count"] = 0
+            state["current_step"] += 1
+            if state["current_step"] > len(plan.steps):
+                state["status"] = "done"
 
-    async def run(self, query: str) -> AgentState:
-        return await self.graph.ainvoke({"query": query})
+        return state

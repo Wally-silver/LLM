@@ -82,3 +82,9 @@ NEO4J_DATABASE=neo4j
 - tool_agent：工具调用
 - reasoning_agent：生成草稿
 - critic_agent：审查与修正
+
+### 结构化协作协议
+- Planner 输出 plan schema：`{steps:[{id,action,tool_call:{tool,args}}]}`
+- Executor 输出 I/O schema：`{input:{...}, output:{result,confidence,reasoning}}`
+- Critic 输出评估 schema：`{score,confidence,feedback,needs_revision}`
+- Reflection Loop：`Planner -> Executor -> Critic -> (score<threshold 则重试)`

@@ -121,8 +121,22 @@ async def lifespan(app: FastAPI):
             response_format={"type": "json_object"},
         )
 
-    agent = AgentOrchestrator(select_tool, execute_tool, retrieve_context, generate_answer, planner_llm=llm)
     multi_agent = MultiAgentCoordinator(llm=llm, rag=rag, kg=kg, tools=tools)
+
+    async def graph_planner(task: str):
+        return await multi_agent._plan(task, history="")
+
+    async def graph_executor(step, state):
+        io = await multi_agent._execute_step(step=step, query=state["task"], history="", shared=state.get("shared", {}))
+        return io.to_dict()
+
+    async def graph_critic(step, result, state):
+        from app.services.agent_schema import AgentIO
+
+        io = AgentIO.from_dict(result)
+        return await multi_agent._critic(state["task"], step, io, state.get("shared", {}))
+
+    agent = AgentOrchestrator(graph_planner, graph_executor, graph_critic)
 
     app.state.redis = redis_client
     app.state.http_client = http_client
