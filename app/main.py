@@ -21,7 +21,7 @@ from app.services.rag import RAGService
 from app.services.tools import Tool, ToolRegistry
 from app.services.datasource import DataSourceService
 from app.services.knowledge_graph import KnowledgeGraphService
-from app.services.evaluator import AutoEvaluator
+from app.services.evaluator import AutoEvaluator, AgentQualityEvaluator
 from app.services.multi_agent import MultiAgentCoordinator
 from app.domain.windows_it_admin import WINDOWS_IT_ADMIN_SOURCES, WINDOWS_IT_ADMIN_TASKS
 from app.domain.advanced_reasoning import (
@@ -63,6 +63,7 @@ async def lifespan(app: FastAPI):
     kg = KnowledgeGraphService(settings.neo4j_uri, settings.neo4j_username, settings.neo4j_password, settings.neo4j_database)
     await kg.connect()
     evaluator = AutoEvaluator()
+    agent_quality_evaluator = AgentQualityEvaluator()
     tools = ToolRegistry()
     docs_store: dict[str, dict] = {}
 
@@ -75,8 +76,24 @@ async def lifespan(app: FastAPI):
         chunks = await rag.retrieve(query)
         return {"chunks": [c.text for c in chunks]}
 
-    tools.register(Tool(name="weather", description="Get weather info", handler=weather_tool))
-    tools.register(Tool(name="rag_search", description="Semantic retrieve internal knowledge", handler=rag_tool))
+    tools.register(
+        Tool(
+            name="weather",
+            description="Get weather info",
+            handler=weather_tool,
+            input_schema={"required": ["query"]},
+            output_schema={"type": "object"},
+        )
+    )
+    tools.register(
+        Tool(
+            name="rag_search",
+            description="Semantic retrieve internal knowledge",
+            handler=rag_tool,
+            input_schema={"required": ["query"]},
+            output_schema={"type": "object"},
+        )
+    )
 
     # 初始数据源示例，可通过 /datasources/ingest 动态注入并热更新索引
     docs_store["doc-1"] = {
@@ -127,16 +144,19 @@ async def lifespan(app: FastAPI):
         return await multi_agent._plan(task, history="")
 
     async def graph_executor(step, state):
-        io = await multi_agent._execute_step(step=step, query=state["task"], history="", shared=state.get("shared", {}))
+        io = await multi_agent._execute_step(step=step, state=state)
         return io.to_dict()
 
     async def graph_critic(step, result, state):
         from app.services.agent_schema import AgentIO
 
         io = AgentIO.from_dict(result)
-        return await multi_agent._critic(state["task"], step, io, state.get("shared", {}))
+        return await multi_agent._critic(step, io, state)
 
-    agent = AgentOrchestrator(graph_planner, graph_executor, graph_critic)
+    async def graph_replanner(state, failed_step, critic):
+        return await multi_agent._replan(state["task"], "", state, failed_step, critic)
+
+    agent = AgentOrchestrator(graph_planner, graph_executor, graph_critic, replanner=graph_replanner)
 
     app.state.redis = redis_client
     app.state.http_client = http_client
@@ -148,6 +168,7 @@ async def lifespan(app: FastAPI):
     app.state.datasource = datasource
     app.state.kg = kg
     app.state.evaluator = evaluator
+    app.state.agent_quality_evaluator = agent_quality_evaluator
     app.state.docs_store = docs_store
     app.state.tools = tools
     app.state.agent = agent
@@ -215,6 +236,10 @@ def get_kg(request: Request) -> KnowledgeGraphService:
 
 def get_evaluator(request: Request) -> AutoEvaluator:
     return request.app.state.evaluator
+
+
+def get_agent_quality_evaluator(request: Request) -> AgentQualityEvaluator:
+    return request.app.state.agent_quality_evaluator
 
 
 def get_multi_agent(request: Request) -> MultiAgentCoordinator:
@@ -328,6 +353,18 @@ async def run_eval(
 
     limit = limit_per_dataset or settings.eval_default_limit_per_dataset
     return await evaluator.evaluate(answer_func=answer_func, limit_per_dataset=limit)
+
+
+
+
+@app.post("/eval/agent-quality")
+async def eval_agent_quality(
+    req: AgentRequest,
+    multi_agent: MultiAgentCoordinator = Depends(get_multi_agent),
+    evaluator: AgentQualityEvaluator = Depends(get_agent_quality_evaluator),
+):
+    run_output = await multi_agent.run(req.query, history="")
+    return evaluator.evaluate_agent_run(run_output)
 
 
 @app.post("/datasources/ingest")

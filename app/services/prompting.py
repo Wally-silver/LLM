@@ -20,6 +20,29 @@ def build_user_prompt(query: str, context: str, history: str, tool_result: dict 
     )
 
 
+def build_planner_prompt(query: str, history: str) -> str:
+    return (
+        "你是 Planner，请输出结构化计划 JSON。"
+        "包括 goal, strategy, steps[].{id,action,description,depends_on,tool_call,expected_output,fallback_action}.\n"
+        f"query={query}\n"
+        f"history={history[-2000:]}"
+    )
+
+
+def build_replanner_prompt(query: str, state: dict, failed_step: dict, critic: dict) -> str:
+    return (
+        "你是 Replanner，请基于失败步骤和critic反馈重规划。\n"
+        "尽量保留已完成步骤，修复失败路径。输出完整 plan JSON。\n"
+        f"query={query}\nstate={json.dumps(state, ensure_ascii=False)[:3000]}\n"
+        f"failed_step={json.dumps(failed_step, ensure_ascii=False)}\n"
+        f"critic={json.dumps(critic, ensure_ascii=False)}"
+    )
+
+
+def build_executor_prompt(action: str, query: str, context: str, history: str, tool_result: dict | None = None) -> str:
+    return f"[action]={action}\n" + build_user_prompt(query, context, history, tool_result)
+
+
 def history_fingerprint(history_text: str) -> str:
     return hashlib.sha256(history_text.encode("utf-8")).hexdigest()[:16]
 

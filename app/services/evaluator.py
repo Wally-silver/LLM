@@ -77,13 +77,49 @@ class AutoEvaluator:
             total["em"] += em_sum
             total["f1"] += f1_sum
 
-        if total["count"]:
-            total_metrics = {
-                "count": total["count"],
-                "em": round(total["em"] / total["count"], 4),
-                "f1": round(total["f1"] / total["count"], 4),
-            }
-        else:
-            total_metrics = {"count": 0, "em": 0.0, "f1": 0.0}
-
+        total_metrics = {
+            "count": total["count"],
+            "em": round(total["em"] / total["count"], 4) if total["count"] else 0.0,
+            "f1": round(total["f1"] / total["count"], 4) if total["count"] else 0.0,
+        }
         return {"datasets": results, "overall": total_metrics}
+
+
+class AgentQualityEvaluator:
+    """Rule-based evaluator for planning/reflection/autonomous-agent quality."""
+
+    def evaluate_plan_quality(self, plan: dict) -> dict:
+        steps = plan.get("steps", []) if isinstance(plan, dict) else []
+        dep_steps = [s for s in steps if s.get("depends_on")]
+        tool_steps = [s for s in steps if s.get("tool_call", {}).get("tool")]
+        return {
+            "plan_step_count": len(steps),
+            "dependency_coverage": round(len(dep_steps) / len(steps), 4) if steps else 0.0,
+            "structured_tool_usage": round(len(tool_steps) / len(steps), 4) if steps else 0.0,
+        }
+
+    def evaluate_reflection_trace(self, state: dict) -> dict:
+        history = state.get("history", []) if isinstance(state, dict) else []
+        transitions = [h.get("transition_decision") for h in history]
+        reflection_triggered = any(t == "retry" for t in transitions)
+        replan_triggered = any(t == "replan" for t in transitions)
+        successful_recovery = state.get("status") == "done" and (reflection_triggered or replan_triggered)
+        return {
+            "reflection_triggered": reflection_triggered,
+            "replan_triggered": replan_triggered,
+            "successful_recovery": successful_recovery,
+            "final_status": state.get("status", "unknown"),
+        }
+
+    def evaluate_agent_run(self, run_output: dict) -> dict:
+        metadata = run_output.get("metadata", {})
+        plan = metadata.get("plan", {})
+        state = metadata.get("final_state", {})
+        plan_q = self.evaluate_plan_quality(plan)
+        trace_q = self.evaluate_reflection_trace(state)
+        answer_present = bool(run_output.get("answer"))
+        return {
+            **plan_q,
+            **trace_q,
+            "answer_present": answer_present,
+        }
