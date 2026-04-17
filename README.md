@@ -9,7 +9,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8080
 
 ## API
 - `POST /ask`
-- `POST /agent`
+- `POST /agent`（多Agent协作）
 - `GET /health`
 - `GET /datasources`
 - `POST /datasources/ingest`
@@ -19,6 +19,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8080
 - `GET /datasets/catalog`
 - `GET /eval/datasets`
 - `POST /eval/run`
+- `GET /agent/capabilities`
 - `POST /rag/rebuild`
 
 ---
@@ -72,3 +73,12 @@ NEO4J_DATABASE=neo4j
 3. 个性化会话推荐（ReDial）
 4. 多模态知识推理（ScienceQA + DocVQA）
 
+
+
+## 多Agent协作链路
+- task_router：任务类型路由
+- retriever_agent：向量检索
+- kg_agent：图谱检索
+- tool_agent：工具调用
+- reasoning_agent：生成草稿
+- critic_agent：审查与修正

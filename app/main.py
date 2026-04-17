@@ -22,6 +22,7 @@ from app.services.tools import Tool, ToolRegistry
 from app.services.datasource import DataSourceService
 from app.services.knowledge_graph import KnowledgeGraphService
 from app.services.evaluator import AutoEvaluator
+from app.services.multi_agent import MultiAgentCoordinator
 from app.domain.windows_it_admin import WINDOWS_IT_ADMIN_SOURCES, WINDOWS_IT_ADMIN_TASKS
 from app.domain.advanced_reasoning import (
     ADVANCED_REASONING_DATASET_CATALOG,
@@ -121,6 +122,7 @@ async def lifespan(app: FastAPI):
         )
 
     agent = AgentOrchestrator(select_tool, execute_tool, retrieve_context, generate_answer, planner_llm=llm)
+    multi_agent = MultiAgentCoordinator(llm=llm, rag=rag, kg=kg, tools=tools)
 
     app.state.redis = redis_client
     app.state.http_client = http_client
@@ -135,6 +137,7 @@ async def lifespan(app: FastAPI):
     app.state.docs_store = docs_store
     app.state.tools = tools
     app.state.agent = agent
+    app.state.multi_agent = multi_agent
 
     # 可选后台定时任务：示例每小时重建索引（演示热更新能力）
     stop_event = asyncio.Event()
@@ -198,6 +201,10 @@ def get_kg(request: Request) -> KnowledgeGraphService:
 
 def get_evaluator(request: Request) -> AutoEvaluator:
     return request.app.state.evaluator
+
+
+def get_multi_agent(request: Request) -> MultiAgentCoordinator:
+    return request.app.state.multi_agent
 
 
 @app.get("/health")
@@ -420,12 +427,29 @@ async def ask(
         raise HTTPException(status_code=500, detail={"code": "ASK_FAILED", "message": str(exc)}) from exc
 
 
+
+
+@app.get("/agent/capabilities")
+async def agent_capabilities():
+    return {
+        "architecture": "multi_agent",
+        "agents": [
+            "task_router",
+            "retriever_agent",
+            "kg_agent",
+            "tool_agent",
+            "reasoning_agent",
+            "critic_agent",
+        ],
+    }
+
+
 @app.post("/agent")
 async def run_agent(
     req: AgentRequest,
     memory: SessionMemory = Depends(get_memory),
     cache: CacheService = Depends(get_cache),
-    agent: AgentOrchestrator = Depends(get_agent),
+    multi_agent: MultiAgentCoordinator = Depends(get_multi_agent),
     metrics: Metrics = Depends(get_metrics),
 ):
     try:
@@ -437,22 +461,10 @@ async def run_agent(
                 cached["cache_hit"] = True
                 return JSONResponse(cached)
 
-            state = await agent.run(req.query)
-            answer = state.get("answer", "")
-            parsed = extract_json(answer)
-            result = {
-                "answer": parsed.get("answer", answer),
-                "citations": parsed.get("citations", []),
-                "used_tools": parsed.get("used_tools", []),
-                "metadata": {
-                    **parsed.get("metadata", {}),
-                    "selected_tool": state.get("selected_tool"),
-                    "tool_result": state.get("tool_result"),
-                },
-                "cache_hit": False,
-            }
+            result = await multi_agent.run(req.query, history=history)
+            result["cache_hit"] = False
             await memory.add_turn(req.session_id, "user", req.query)
-            await memory.add_turn(req.session_id, "assistant", result["answer"])
+            await memory.add_turn(req.session_id, "assistant", result.get("answer", ""))
             await cache.set(req.session_id, req.query, result, fp)
             return JSONResponse(result)
     except Exception as exc:
