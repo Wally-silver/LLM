@@ -1,12 +1,4 @@
-# Industrial AI Agent (Windows-ready)
-
-## 现在可在 Windows 本地运行（无需 vLLM）
-默认 LLM 提供者已改为 **Ollama**：
-- `LLM_PROVIDER=ollama`
-- `OPENAI_COMPATIBLE_BASE_URL=http://localhost:11434`
-- 默认模型：`qwen2.5:7b-instruct`
-
-> 仍兼容 OpenAI/vLLM：把 `LLM_PROVIDER` 改为 `openai_compatible` 即可。
+# Industrial AI Agent (Windows-ready + RAG Eval + Neo4j KG)
 
 ## 快速启动（Windows PowerShell）
 ```powershell
@@ -22,44 +14,59 @@ uvicorn app.main:app --host 0.0.0.0 --port 8080
 - `GET /datasources`
 - `POST /datasources/ingest`
 - `POST /datasources/bootstrap/windows-it-admin`
-- `GET /tasks/windows-it-admin`
 - `POST /datasources/bootstrap/advanced-reasoning`
 - `GET /tasks/advanced-reasoning`
 - `GET /datasets/catalog`
+- `GET /eval/datasets`
+- `POST /eval/run`
 - `POST /rag/rebuild`
 
 ---
 
-## 领域包 A：Windows IT 管理（真实文档）
-### 文档来源（Microsoft Learn）
-1. https://learn.microsoft.com/en-us/windows/package-manager/winget/
-2. https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_execution_policies
-3. https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/sc-create
-4. https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/netsh-wlan
+## 按 7 个数据集做自动评测
+已内置 7 个可落地数据集目录（多跳 / 多轮 / 推荐 / 多模态）：
+- HotpotQA
+- 2WikiMultiHopQA
+- MuSiQue
+- MultiWOZ
+- ReDial
+- ScienceQA
+- DocVQA
 
-### 一键导入
-```bash
-curl -X POST http://127.0.0.1:8080/datasources/bootstrap/windows-it-admin
-```
-
----
-
-## 领域包 B：高级推理落地（多跳 / 多轮 / 个性化推荐 / 多模态）
-### 一键导入
+### 评测流程
+1) 导入领域文档
 ```bash
 curl -X POST http://127.0.0.1:8080/datasources/bootstrap/advanced-reasoning
 ```
+2) 查看数据集目录
+```bash
+curl http://127.0.0.1:8080/datasets/catalog
+```
+3) 运行自动评测（EM/F1）
+```bash
+curl -X POST "http://127.0.0.1:8080/eval/run?limit_per_dataset=20"
+```
 
-### 真实可用数据集/文档（可项目落地）
-- HotpotQA: https://hotpotqa.github.io/
-- 2WikiMultiHopQA: https://github.com/Alab-NII/2wikimultihop
-- MuSiQue: https://huggingface.co/datasets/dwhiii/musique
-- MultiWOZ: https://github.com/budzianowski/multiwoz
-- ReDial: https://redialdata.github.io/website/download
-- ScienceQA: https://github.com/lupantech/ScienceQA
-- DocVQA: https://www.docvqa.org/datasets
+> 默认使用每个数据集的 sample 子集进行自动回归；你可以扩展 `data/eval/*.jsonl` 到完整 benchmark。
 
-### 4个具体任务
+---
+
+## 知识图谱（Neo4j）融合
+配置 `.env`：
+```env
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USERNAME=neo4j
+NEO4J_PASSWORD=your_password
+NEO4J_DATABASE=neo4j
+```
+
+效果：
+- 数据源导入时自动 upsert 文档节点到 Neo4j
+- 问答时会把 KG 相关节点摘要拼接到 RAG context（Graph + Vector 混合检索）
+
+---
+
+## 高级任务（已替换，不再使用原先 4 个 Windows 操作任务）
 1. 多跳推理问答（HotpotQA/2Wiki/MuSiQue）
 2. 多轮任务型问答（MultiWOZ）
 3. 个性化会话推荐（ReDial）

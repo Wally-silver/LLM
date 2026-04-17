@@ -20,6 +20,8 @@ from app.services.prompting import SYSTEM_PROMPT, build_user_prompt, extract_jso
 from app.services.rag import RAGService
 from app.services.tools import Tool, ToolRegistry
 from app.services.datasource import DataSourceService
+from app.services.knowledge_graph import KnowledgeGraphService
+from app.services.evaluator import AutoEvaluator
 from app.domain.windows_it_admin import WINDOWS_IT_ADMIN_SOURCES, WINDOWS_IT_ADMIN_TASKS
 from app.domain.advanced_reasoning import (
     ADVANCED_REASONING_DATASET_CATALOG,
@@ -57,6 +59,9 @@ async def lifespan(app: FastAPI):
         top_k=settings.rag_top_k,
     )
     datasource = DataSourceService(http_client, max_chars=settings.datasource_max_chars)
+    kg = KnowledgeGraphService(settings.neo4j_uri, settings.neo4j_username, settings.neo4j_password, settings.neo4j_database)
+    await kg.connect()
+    evaluator = AutoEvaluator()
     tools = ToolRegistry()
     docs_store: dict[str, dict] = {}
 
@@ -125,6 +130,8 @@ async def lifespan(app: FastAPI):
     app.state.llm = llm
     app.state.rag = rag
     app.state.datasource = datasource
+    app.state.kg = kg
+    app.state.evaluator = evaluator
     app.state.docs_store = docs_store
     app.state.tools = tools
     app.state.agent = agent
@@ -145,6 +152,7 @@ async def lifespan(app: FastAPI):
     finally:
         stop_event.set()
         task.cancel()
+        await kg.close()
         await redis_client.aclose()
         await http_client.aclose()
 
@@ -184,6 +192,14 @@ def get_docs_store(request: Request) -> dict:
     return request.app.state.docs_store
 
 
+def get_kg(request: Request) -> KnowledgeGraphService:
+    return request.app.state.kg
+
+
+def get_evaluator(request: Request) -> AutoEvaluator:
+    return request.app.state.evaluator
+
+
 @app.get("/health")
 async def health(metrics: Metrics = Depends(get_metrics)):
     return {"status": "ok", "metrics": await metrics.snapshot()}
@@ -208,6 +224,7 @@ async def bootstrap_windows_it_admin(
     datasource: DataSourceService = Depends(get_datasource),
     docs_store: dict = Depends(get_docs_store),
     rag: RAGService = Depends(get_rag),
+    kg: KnowledgeGraphService = Depends(get_kg),
 ):
     loaded = []
     for item in WINDOWS_IT_ADMIN_SOURCES:
@@ -219,6 +236,7 @@ async def bootstrap_windows_it_admin(
             "task_tags": item.get("task_tags", []),
         }
         loaded.append(doc.doc_id)
+        await kg.upsert_document(doc.doc_id, doc.source_type, doc.source_value, doc.text)
     await rag.build_index([(k, v["text"]) for k, v in docs_store.items()])
     return {"ok": True, "loaded_docs": loaded, "tasks": WINDOWS_IT_ADMIN_TASKS}
 
@@ -233,6 +251,7 @@ async def bootstrap_advanced_reasoning(
     datasource: DataSourceService = Depends(get_datasource),
     docs_store: dict = Depends(get_docs_store),
     rag: RAGService = Depends(get_rag),
+    kg: KnowledgeGraphService = Depends(get_kg),
 ):
     loaded = []
     for item in ADVANCED_REASONING_SOURCES:
@@ -244,6 +263,7 @@ async def bootstrap_advanced_reasoning(
             "task_tags": item.get("task_tags", []),
         }
         loaded.append(doc.doc_id)
+        await kg.upsert_document(doc.doc_id, doc.source_type, doc.source_value, doc.text)
     await rag.build_index([(k, v["text"]) for k, v in docs_store.items()])
     return {"ok": True, "loaded_docs": loaded, "tasks": ADVANCED_REASONING_TASKS}
 
@@ -258,12 +278,44 @@ async def datasets_catalog():
     return {"datasets": ADVANCED_REASONING_DATASET_CATALOG}
 
 
+
+
+@app.get("/eval/datasets")
+async def eval_datasets():
+    from app.eval.registry import dataset_summaries
+
+    return {"datasets": dataset_summaries()}
+
+
+@app.post("/eval/run")
+async def run_eval(
+    limit_per_dataset: int | None = None,
+    llm: VLLMOpenAIClient = Depends(get_llm),
+    evaluator: AutoEvaluator = Depends(get_evaluator),
+):
+    async def answer_func(question: str, context: str) -> str:
+        prompt = build_user_prompt(question, context, history="")
+        output = await llm.complete(
+            SYSTEM_PROMPT,
+            prompt,
+            stream=False,
+            max_tokens=settings.llm_default_max_tokens,
+            response_format={"type": "json_object"},
+        )
+        parsed = extract_json(output)
+        return parsed.get("answer", output)
+
+    limit = limit_per_dataset or settings.eval_default_limit_per_dataset
+    return await evaluator.evaluate(answer_func=answer_func, limit_per_dataset=limit)
+
+
 @app.post("/datasources/ingest")
 async def ingest_datasource(
     req: IngestSourceRequest,
     datasource: DataSourceService = Depends(get_datasource),
     docs_store: dict = Depends(get_docs_store),
     rag: RAGService = Depends(get_rag),
+    kg: KnowledgeGraphService = Depends(get_kg),
 ):
     doc = await datasource.load(req.source_type, req.source_value, doc_id=req.doc_id)
     docs_store[doc.doc_id] = {
@@ -272,10 +324,11 @@ async def ingest_datasource(
         "source_value": doc.source_value,
     }
     await rag.build_index([(k, v["text"]) for k, v in docs_store.items()])
+    await kg.upsert_document(doc.doc_id, doc.source_type, doc.source_value, doc.text)
     return {"ok": True, "doc_id": doc.doc_id, "total_docs": len(docs_store)}
 
 
-async def _non_stream_answer(req: AskRequest, memory: SessionMemory, cache: CacheService, llm: VLLMOpenAIClient, rag: RAGService):
+async def _non_stream_answer(req: AskRequest, memory: SessionMemory, cache: CacheService, llm: VLLMOpenAIClient, rag: RAGService, kg: KnowledgeGraphService):
     history = await memory.history_as_text(req.session_id)
     fp = history_fingerprint(history)
 
@@ -296,7 +349,8 @@ async def _non_stream_answer(req: AskRequest, memory: SessionMemory, cache: Cach
                     return cached_retry
 
         chunks = await rag.retrieve(req.query)
-        context = "\n".join([f"[{c.doc_id}] {c.text}" for c in chunks])
+        kg_related = await kg.search_related(req.query, limit=3)
+        context = "\n".join([f"[{c.doc_id}] {c.text}" for c in chunks] + kg_related)
         prompt = build_user_prompt(req.query, context, history)
         output = await llm.complete(
             SYSTEM_PROMPT,
@@ -331,6 +385,7 @@ async def ask(
     cache: CacheService = Depends(get_cache),
     llm: VLLMOpenAIClient = Depends(get_llm),
     rag: RAGService = Depends(get_rag),
+    kg: KnowledgeGraphService = Depends(get_kg),
     metrics: Metrics = Depends(get_metrics),
 ):
     try:
@@ -338,7 +393,8 @@ async def ask(
             if req.stream:
                 history = await memory.history_as_text(req.session_id)
                 chunks = await rag.retrieve(req.query)
-                context = "\n".join([f"[{c.doc_id}] {c.text}" for c in chunks])
+                kg_related = await kg.search_related(req.query, limit=3)
+                context = "\n".join([f"[{c.doc_id}] {c.text}" for c in chunks] + kg_related)
                 prompt = build_user_prompt(req.query, context, history)
 
                 async def event_stream():
@@ -358,7 +414,7 @@ async def ask(
 
                 return StreamingResponse(event_stream(), media_type="text/event-stream")
 
-            result = await _non_stream_answer(req, memory, cache, llm, rag)
+            result = await _non_stream_answer(req, memory, cache, llm, rag, kg)
             return JSONResponse(result)
     except Exception as exc:
         raise HTTPException(status_code=500, detail={"code": "ASK_FAILED", "message": str(exc)}) from exc

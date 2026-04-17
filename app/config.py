@@ -32,6 +32,15 @@ class Settings(BaseSettings):
     # Datasource
     datasource_max_chars: int = 2_000_000
 
+    # Evaluation
+    eval_default_limit_per_dataset: int = 20
+
+    # Knowledge graph (Neo4j)
+    neo4j_uri: str = ""
+    neo4j_username: str = "neo4j"
+    neo4j_password: str = ""
+    neo4j_database: str = "neo4j"
+
     # Metrics
     metrics_window_size: int = 1000
 

@@ -1,4 +1,4 @@
-"""Windows IT 管理领域 RAG 数据包。"""
+"""Windows IT 管理领域 RAG 数据包（仅文档源，不再提供任务模板）。"""
 
 WINDOWS_IT_ADMIN_SOURCES = [
     {
@@ -27,9 +27,4 @@ WINDOWS_IT_ADMIN_SOURCES = [
     },
 ]
 
-WINDOWS_IT_ADMIN_TASKS = [
-    "任务1：根据文档给出使用 winget 安装/升级/卸载 VS Code 的完整命令与注意事项。",
-    "任务2：排查并修复 PowerShell 脚本被执行策略阻止的问题，区分 Process / CurrentUser / LocalMachine。",
-    "任务3：创建并管理 Windows 服务（sc.exe create/query/config/delete）的安全操作步骤。",
-    "任务4：使用 netsh wlan 进行 Wi-Fi 配置与故障诊断（查看配置、导出配置、生成报告）。",
-]
+WINDOWS_IT_ADMIN_TASKS: list[str] = []
