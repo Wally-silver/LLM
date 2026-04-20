@@ -2,16 +2,27 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
 import redis.asyncio as redis
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.config import settings
-from app.schemas import AgentRequest, AskRequest, IngestSourceRequest, RAGStats, SourceInfo, StructuredAnswer
+from app.schemas import (
+    AgentRequest,
+    AskRequest,
+    AskResult,
+    CompareResponse,
+    IngestSourceRequest,
+    RAGStats,
+    RetrievedHit,
+    SourceInfo,
+)
 from app.services.agent_graph import AgentOrchestrator
 from app.services.cache import CacheService
 from app.services.llm_client import VLLMOpenAIClient
@@ -24,6 +35,7 @@ from app.services.datasource import DataSourceService
 from app.services.knowledge_graph import KnowledgeGraphService
 from app.services.evaluator import AutoEvaluator, AgentQualityEvaluator
 from app.services.document_store import DocumentStore
+from app.services.runtime_fallback import InMemoryCacheService, InMemorySessionMemory
 from app.services.multi_agent import MultiAgentCoordinator
 from app.domain.windows_it_admin import WINDOWS_IT_ADMIN_SOURCES, WINDOWS_IT_ADMIN_TASKS
 from app.domain.advanced_reasoning import (
@@ -35,17 +47,33 @@ from app.domain.advanced_reasoning import (
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    redis_client = redis.from_url(settings.redis_url, encoding="utf-8", decode_responses=True)
+    redis_client = None
+    redis_available = False
+    redis_error = None
+    try:
+        redis_client = redis.from_url(settings.redis_url, encoding="utf-8", decode_responses=True)
+        await redis_client.ping()
+        redis_available = True
+    except Exception as exc:
+        redis_error = str(exc)
+        redis_client = None
     http_client = httpx.AsyncClient(timeout=settings.llm_timeout_seconds)
 
-    memory = SessionMemory(redis_client, ttl_seconds=settings.memory_ttl_seconds)
-    cache = CacheService(
-        redis_client,
-        ttl_seconds=settings.cache_ttl_seconds,
-        jitter_seconds=settings.cache_jitter_seconds,
-        lock_seconds=settings.cache_lock_seconds,
-    )
-    metrics = Metrics(redis_client, window_size=settings.metrics_window_size)
+    if redis_available:
+        memory = SessionMemory(redis_client, ttl_seconds=settings.memory_ttl_seconds)
+        cache = CacheService(
+            redis_client,
+            ttl_seconds=settings.cache_ttl_seconds,
+            jitter_seconds=settings.cache_jitter_seconds,
+            lock_seconds=settings.cache_lock_seconds,
+        )
+    else:
+        memory = InMemorySessionMemory(ttl_seconds=settings.memory_ttl_seconds)
+        cache = InMemoryCacheService(
+            ttl_seconds=settings.cache_ttl_seconds,
+            lock_seconds=settings.cache_lock_seconds,
+        )
+    metrics = Metrics(redis_client if redis_available else None, window_size=settings.metrics_window_size)
     llm = VLLMOpenAIClient(
         settings.openai_compatible_base_url,
         settings.openai_api_key,
@@ -174,6 +202,8 @@ async def lifespan(app: FastAPI):
     app.state.tools = tools
     app.state.agent = agent
     app.state.multi_agent = multi_agent
+    app.state.redis_available = redis_available
+    app.state.redis_error = redis_error
 
     # 可选后台定时任务：示例每小时重建索引（演示热更新能力）
     stop_event = asyncio.Event()
@@ -192,11 +222,19 @@ async def lifespan(app: FastAPI):
         stop_event.set()
         task.cancel()
         await kg.close()
-        await redis_client.aclose()
+        if redis_client is not None:
+            await redis_client.aclose()
         await http_client.aclose()
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 def get_memory(request: Request) -> SessionMemory:
@@ -247,13 +285,77 @@ def get_multi_agent(request: Request) -> MultiAgentCoordinator:
     return request.app.state.multi_agent
 
 
+def _build_retrieved_hits(chunks, docs_store: DocumentStore) -> list[RetrievedHit]:
+    hits: list[RetrievedHit] = []
+    for c in chunks:
+        doc = docs_store.get(c.doc_id)
+        score = c.metadata.get("rerank_score") if isinstance(c.metadata, dict) else None
+        hits.append(
+            RetrievedHit(
+                doc_id=c.doc_id,
+                title=(doc.title if doc else None),
+                source_type=(doc.source_type if doc else None),
+                source_value=(doc.source_value if doc else None),
+                score=float(score) if score is not None else None,
+                snippet=c.text,
+                metadata=(c.metadata if isinstance(c.metadata, dict) else {}),
+            )
+        )
+    return hits
+
+
+async def _run_single_answer(
+    *,
+    req: AskRequest,
+    llm: VLLMOpenAIClient,
+    rag: RAGService,
+    kg: KnowledgeGraphService,
+    memory,
+    use_rag: bool,
+    docs_store: DocumentStore,
+) -> AskResult:
+    history = await memory.history_as_text(req.session_id)
+    chunks = await rag.retrieve(req.query) if use_rag else []
+    kg_related = await kg.search_related(req.query, limit=3) if use_rag else []
+    context = "\n".join([f"[{c.doc_id}] {c.text}" for c in chunks] + kg_related) if use_rag else ""
+    prompt = build_user_prompt(req.query, context, history)
+    begin = time.perf_counter()
+    output = await llm.complete(
+        SYSTEM_PROMPT,
+        prompt,
+        stream=False,
+        max_tokens=settings.llm_default_max_tokens,
+        response_format={"type": "json_object"},
+    )
+    elapsed = int((time.perf_counter() - begin) * 1000)
+    parsed = extract_json(output)
+    return AskResult(
+        answer=parsed.get("answer", output),
+        use_rag=use_rag,
+        rag_context=context if req.show_retrieval else "",
+        retrieved_docs=_build_retrieved_hits(chunks, docs_store) if req.show_retrieval else [],
+        kg_hits=kg_related if req.show_retrieval else [],
+        citations=parsed.get("citations", []),
+        used_tools=parsed.get("used_tools", []),
+        latency_ms=elapsed,
+        metadata=parsed.get("metadata", {}),
+    )
+
+
 @app.get("/health")
-async def health(metrics: Metrics = Depends(get_metrics)):
-    return {"status": "ok", "metrics": await metrics.snapshot()}
+async def health(request: Request, metrics: Metrics = Depends(get_metrics), kg: KnowledgeGraphService = Depends(get_kg)):
+    return {
+        "status": "ok",
+        "metrics": await metrics.snapshot(),
+        "redis_available": bool(request.app.state.redis_available),
+        "redis_error": request.app.state.redis_error,
+        "neo4j": kg.status(),
+    }
 
 
 @app.post("/rag/rebuild")
-async def rebuild_rag(docs: list[tuple[str, str]], rag: RAGService = Depends(get_rag)):
+async def rebuild_rag(rag: RAGService = Depends(get_rag), docs_store: DocumentStore = Depends(get_docs_store)):
+    docs = docs_store.all_docs_for_index()
     await rag.build_index(docs)
     return {"ok": True, "docs": len(docs)}
 
@@ -264,6 +366,35 @@ async def list_datasources(docs_store: DocumentStore = Depends(get_docs_store)):
         SourceInfo(doc_id=v["doc_id"], source_type=v["source_type"], source_value=v["source_value"])
         for v in docs_store.list_sources()
     ]
+
+
+@app.get("/documents")
+async def list_documents(docs_store: DocumentStore = Depends(get_docs_store)):
+    return {"documents": docs_store.list_sources()}
+
+
+@app.delete("/documents/{doc_id}")
+async def delete_document(
+    doc_id: str,
+    docs_store: DocumentStore = Depends(get_docs_store),
+    rag: RAGService = Depends(get_rag),
+):
+    deleted = docs_store.delete_by_doc_id(doc_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail={"error": "doc_not_found", "doc_id": doc_id})
+    await rag.build_index(docs_store.all_docs_for_index())
+    return {"ok": True, "deleted_doc_id": doc_id}
+
+
+@app.delete("/documents")
+async def delete_documents_by_source(
+    source_value: str,
+    docs_store: DocumentStore = Depends(get_docs_store),
+    rag: RAGService = Depends(get_rag),
+):
+    deleted = docs_store.delete_by_source(source_value)
+    await rag.build_index(docs_store.all_docs_for_index())
+    return {"ok": True, "deleted": deleted, "source_value": source_value}
 
 
 @app.post("/datasources/bootstrap/windows-it-admin")
@@ -317,6 +448,17 @@ async def advanced_reasoning_tasks():
 @app.get("/datasets/catalog")
 async def datasets_catalog():
     return {"datasets": ADVANCED_REASONING_DATASET_CATALOG}
+
+
+@app.get("/system/status")
+async def system_status(request: Request, kg: KnowledgeGraphService = Depends(get_kg)):
+    return {
+        "redis": {
+            "available": bool(request.app.state.redis_available),
+            "error": request.app.state.redis_error,
+        },
+        "neo4j": kg.status(),
+    }
 
 
 
@@ -381,14 +523,20 @@ async def ingest_datasource(
 
     write_result = docs_store.bulk_upsert(result.documents, overwrite=req.overwrite)
     await rag.build_index(docs_store.all_docs_for_index())
+    kg_errors = []
     for doc in result.documents:
-        await kg.upsert_document(doc.doc_id, doc.source_type, doc.source_value, doc.text)
+        try:
+            await kg.upsert_document(doc.doc_id, doc.source_type, doc.source_value, doc.text)
+        except Exception as exc:
+            kg_errors.append({"doc_id": doc.doc_id, "error": str(exc)})
     return {
         "ok": True,
         "inserted": write_result["inserted"],
         "skipped": write_result["skipped"],
         "total_docs": docs_store.stats().document_count,
         "errors": result.errors,
+        "kg_errors": kg_errors,
+        "neo4j": kg.status(),
     }
 
 
@@ -396,84 +544,94 @@ async def ingest_datasource(
 async def rag_stats(
     rag: RAGService = Depends(get_rag),
     docs_store: DocumentStore = Depends(get_docs_store),
+    kg: KnowledgeGraphService = Depends(get_kg),
 ):
     rag_snapshot = rag.stats()
     store_stats = docs_store.stats()
+    kg_state = kg.status()
     return RAGStats(
         document_count=store_stats.document_count,
         source_count=store_stats.source_count,
         chunk_count=rag_snapshot["chunk_count"],
+        index_ready=bool(rag_snapshot.get("indexed")),
+        embedding_model=rag.embedding_model,
+        reranker_model=rag.rerank_model,
+        neo4j_enabled=bool(kg_state["enabled"]),
+        neo4j_connected=bool(kg_state["connected"]),
     )
 
 
-async def _non_stream_answer(req: AskRequest, memory: SessionMemory, cache: CacheService, llm: VLLMOpenAIClient, rag: RAGService, kg: KnowledgeGraphService):
+async def _non_stream_answer(
+    req: AskRequest,
+    memory,
+    cache,
+    llm: VLLMOpenAIClient,
+    rag: RAGService,
+    kg: KnowledgeGraphService,
+    docs_store: DocumentStore,
+):
     history = await memory.history_as_text(req.session_id)
     fp = history_fingerprint(history)
+    mode = "rag" if req.use_rag else "no_rag"
+    cache_key_query = f"{mode}|{req.query}"
 
-    cached = await cache.get(req.session_id, req.query, fp)
+    cached = await cache.get(req.session_id, cache_key_query, fp)
     if cached:
         cached["cache_hit"] = True
         return cached
 
-    lock_acquired = await cache.acquire_lock(req.session_id, req.query, fp)
+    lock_acquired = await cache.acquire_lock(req.session_id, cache_key_query, fp)
     try:
         if not lock_acquired:
             # 避免击穿：等待已在计算中的请求写入缓存
             for _ in range(5):
                 await asyncio.sleep(0.1)
-                cached_retry = await cache.get(req.session_id, req.query, fp)
+                cached_retry = await cache.get(req.session_id, cache_key_query, fp)
                 if cached_retry:
                     cached_retry["cache_hit"] = True
                     return cached_retry
 
-        chunks = await rag.retrieve(req.query)
-        kg_related = await kg.search_related(req.query, limit=3)
-        context = "\n".join([f"[{c.doc_id}] {c.text}" for c in chunks] + kg_related)
-        prompt = build_user_prompt(req.query, context, history)
-        output = await llm.complete(
-            SYSTEM_PROMPT,
-            prompt,
-            stream=False,
-            max_tokens=settings.llm_default_max_tokens,
-            response_format={"type": "json_object"},
+        result = await _run_single_answer(
+            req=req,
+            llm=llm,
+            rag=rag,
+            kg=kg,
+            memory=memory,
+            use_rag=req.use_rag,
+            docs_store=docs_store,
         )
-        parsed = extract_json(output)
-        result = StructuredAnswer(
-            answer=parsed.get("answer", output),
-            citations=parsed.get("citations", []),
-            used_tools=parsed.get("used_tools", []),
-            metadata=parsed.get("metadata", {}),
-            latency_ms=0,
-            cache_hit=False,
-        ).model_dump()
+        payload = result.model_dump()
+        payload["cache_hit"] = False
 
         await memory.add_turn(req.session_id, "user", req.query)
-        await memory.add_turn(req.session_id, "assistant", result["answer"])
-        await cache.set(req.session_id, req.query, result, fp)
-        return result
+        await memory.add_turn(req.session_id, "assistant", payload["answer"])
+        await cache.set(req.session_id, cache_key_query, payload, fp)
+        return payload
     finally:
         if lock_acquired:
-            await cache.release_lock(req.session_id, req.query, fp)
+            await cache.release_lock(req.session_id, cache_key_query, fp)
 
 
 @app.post("/ask")
 async def ask(
     req: AskRequest,
-    memory: SessionMemory = Depends(get_memory),
-    cache: CacheService = Depends(get_cache),
+    memory = Depends(get_memory),
+    cache = Depends(get_cache),
     llm: VLLMOpenAIClient = Depends(get_llm),
     rag: RAGService = Depends(get_rag),
     kg: KnowledgeGraphService = Depends(get_kg),
     metrics: Metrics = Depends(get_metrics),
+    docs_store: DocumentStore = Depends(get_docs_store),
 ):
     try:
         async with metrics.track("/ask"):
             if req.stream:
                 history = await memory.history_as_text(req.session_id)
-                chunks = await rag.retrieve(req.query)
-                kg_related = await kg.search_related(req.query, limit=3)
-                context = "\n".join([f"[{c.doc_id}] {c.text}" for c in chunks] + kg_related)
+                chunks = await rag.retrieve(req.query) if req.use_rag else []
+                kg_related = await kg.search_related(req.query, limit=3) if req.use_rag else []
+                context = "\n".join([f"[{c.doc_id}] {c.text}" for c in chunks] + kg_related) if req.use_rag else ""
                 prompt = build_user_prompt(req.query, context, history)
+                retrieved = _build_retrieved_hits(chunks, docs_store)
 
                 async def event_stream():
                     stream = await llm.complete(
@@ -487,15 +645,66 @@ async def ask(
                         parts.append(token)
                         yield f"data: {json.dumps({'token': token}, ensure_ascii=False)}\n\n"
                     full_answer = "".join(parts)
+                    if req.show_retrieval:
+                        yield f"data: {json.dumps({'retrieved_docs': [x.model_dump() for x in retrieved], 'kg_hits': kg_related}, ensure_ascii=False)}\n\n"
                     await memory.add_turn(req.session_id, "user", req.query)
                     await memory.add_turn(req.session_id, "assistant", full_answer)
 
                 return StreamingResponse(event_stream(), media_type="text/event-stream")
 
-            result = await _non_stream_answer(req, memory, cache, llm, rag, kg)
+            result = await _non_stream_answer(req, memory, cache, llm, rag, kg, docs_store)
             return JSONResponse(result)
     except Exception as exc:
         raise HTTPException(status_code=500, detail={"code": "ASK_FAILED", "message": str(exc)}) from exc
+
+
+@app.post("/ask/compare", response_model=CompareResponse)
+async def ask_compare(
+    req: AskRequest,
+    llm: VLLMOpenAIClient = Depends(get_llm),
+    rag: RAGService = Depends(get_rag),
+    kg: KnowledgeGraphService = Depends(get_kg),
+    memory=Depends(get_memory),
+    metrics: Metrics = Depends(get_metrics),
+    docs_store: DocumentStore = Depends(get_docs_store),
+):
+    try:
+        async with metrics.track("/ask/compare"):
+            req_no_rag = req.model_copy(update={"use_rag": False, "stream": False})
+            req_with_rag = req.model_copy(update={"use_rag": True, "stream": False})
+            no_rag_res = await _run_single_answer(
+                req=req_no_rag,
+                llm=llm,
+                rag=rag,
+                kg=kg,
+                memory=memory,
+                use_rag=False,
+                docs_store=docs_store,
+            )
+            rag_res = await _run_single_answer(
+                req=req_with_rag,
+                llm=llm,
+                rag=rag,
+                kg=kg,
+                memory=memory,
+                use_rag=True,
+                docs_store=docs_store,
+            )
+            await memory.add_turn(req.session_id, "user", req.query)
+            await memory.add_turn(req.session_id, "assistant", f"[NO_RAG]{no_rag_res.answer}\n[RAG]{rag_res.answer}")
+            return CompareResponse(
+                query=req.query,
+                no_rag_answer=no_rag_res.answer,
+                rag_answer=rag_res.answer,
+                rag_context=rag_res.rag_context,
+                retrieved_docs=rag_res.retrieved_docs,
+                kg_hits=rag_res.kg_hits,
+                no_rag_latency_ms=no_rag_res.latency_ms,
+                rag_latency_ms=rag_res.latency_ms,
+                latency_diff_ms=rag_res.latency_ms - no_rag_res.latency_ms,
+            )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail={"code": "COMPARE_FAILED", "message": str(exc)}) from exc
 
 
 

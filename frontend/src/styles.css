@@ -1,0 +1,13 @@
+:root { font-family: Inter, system-ui, sans-serif; color: #222; }
+body { margin: 0; background: #fafafa; }
+.page { max-width: 1200px; margin: 0 auto; padding: 24px; }
+.panel { background: white; border-radius: 12px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+.grid2 { display: grid; gap: 16px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.full { grid-column: 1 / -1; }
+.row { display: flex; align-items: center; gap: 10px; }
+input, textarea, select { width: 100%; padding: 8px; margin: 6px 0 10px; }
+button { padding: 8px 12px; }
+pre { background: #111; color: #ddd; padding: 10px; overflow: auto; }
+.hit { padding: 8px; border: 1px solid #eee; border-radius: 8px; margin-bottom: 8px; background: #fffdf7; }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; border-bottom: 1px solid #eee; padding: 8px; }

@@ -60,6 +60,33 @@ class RAGService:
         if not text.strip():
             return []
         overlap = self.chunk_overlap if self.chunk_overlap < self.chunk_token_size else 0
+        # 小说类中文文本通常空格较少，优先按段落处理，尽量减少语义切碎
+        paragraphs = [p.strip() for p in text.split("\n") if p.strip()]
+        space_count = text.count(" ")
+        cjk_hint = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+        if paragraphs and cjk_hint > max(40, space_count * 2):
+            merged: list[str] = []
+            buf = ""
+            target_chars = self.chunk_token_size * 2
+            step_chars = max(1, target_chars - overlap * 2)
+            for p in paragraphs:
+                if len(buf) + len(p) + 1 <= target_chars:
+                    buf = f"{buf}\n{p}".strip()
+                else:
+                    if buf:
+                        merged.append(buf)
+                    buf = p
+            if buf:
+                merged.append(buf)
+            return [
+                DocumentChunk(
+                    doc_id=doc_id,
+                    text=segment,
+                    metadata={"start_char": i * step_chars, "chunk_mode": "paragraph"},
+                )
+                for i, segment in enumerate(merged)
+            ]
+
         if find_spec("tiktoken") is not None:
             import tiktoken
 

@@ -12,6 +12,7 @@ class KnowledgeGraphService:
         self.password = password
         self.database = database
         self.driver = None
+        self.last_error: str | None = None
 
     @property
     def enabled(self) -> bool:
@@ -21,10 +22,18 @@ class KnowledgeGraphService:
         if not self.enabled:
             return
         if find_spec("neo4j") is None:
+            self.last_error = "neo4j package not installed"
             return
         from neo4j import AsyncGraphDatabase
 
-        self.driver = AsyncGraphDatabase.driver(self.uri, auth=(self.username, self.password))
+        try:
+            self.driver = AsyncGraphDatabase.driver(self.uri, auth=(self.username, self.password))
+            async with self.driver.session(database=self.database) as session:
+                await session.run("RETURN 1 AS ok")
+            self.last_error = None
+        except Exception as exc:
+            self.driver = None
+            self.last_error = str(exc)
 
     async def close(self) -> None:
         if self.driver is not None:
@@ -59,3 +68,12 @@ class KnowledgeGraphService:
             result = await session.run(query, keyword=keyword, limit=limit)
             rows = await result.data()
         return [f"[{r['id']}] {r.get('preview','')}" for r in rows]
+
+    def status(self) -> dict:
+        return {
+            "enabled": self.enabled,
+            "connected": self.driver is not None,
+            "error": self.last_error,
+            "uri": self.uri if self.enabled else "",
+            "database": self.database,
+        }

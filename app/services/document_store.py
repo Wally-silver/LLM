@@ -66,6 +66,36 @@ class DocumentStore:
             for d in self._docs.values()
         ]
 
+    def get(self, doc_id: str) -> SourceDocument | None:
+        return self._docs.get(doc_id)
+
+    def to_index_metadata(self) -> dict[str, dict]:
+        return {
+            d.doc_id: {
+                "doc_id": d.doc_id,
+                "title": d.title,
+                "source_type": d.source_type,
+                "source_value": d.source_value,
+                "metadata": d.metadata,
+            }
+            for d in self._docs.values()
+        }
+
+    def delete_by_doc_id(self, doc_id: str) -> bool:
+        if doc_id not in self._docs:
+            return False
+        del self._docs[doc_id]
+        self.persist()
+        return True
+
+    def delete_by_source(self, source_value: str) -> int:
+        targets = [doc_id for doc_id, d in self._docs.items() if d.source_value == source_value]
+        for doc_id in targets:
+            del self._docs[doc_id]
+        if targets:
+            self.persist()
+        return len(targets)
+
     def all_docs_for_index(self) -> list[tuple[str, str]]:
         return [(d.doc_id, d.text) for d in self._docs.values()]
 
