@@ -8,12 +8,14 @@
 
 ```text
 data/knowledge_base/
-  story.md
+  story_full.txt
   characters.md
   timeline.md
   locations.md
   items.md
 ```
+
+> 你提供的长篇正文建议按章节继续拆分（`chapter_001.md`、`chapter_002.md`...），并保留 `story_full.txt` 作为全集基线稿。
 
 ## 3. 导入方式
 - 目录批量：`source_type=directory` + `source_value=data/knowledge_base`
