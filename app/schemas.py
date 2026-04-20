@@ -23,12 +23,20 @@ class StructuredAnswer(BaseModel):
 
 
 class IngestSourceRequest(BaseModel):
-    source_type: str = Field(description="inline | file | url")
-    source_value: str = Field(description="文本内容、文件路径或URL")
+    source_type: str = Field(description="inline | file | url | directory | json | jsonl | csv")
+    source_value: str = Field(description="文本内容、文件路径、目录路径或URL")
     doc_id: str | None = Field(default=None, description="可选文档ID")
+    recursive: bool = True
+    overwrite: bool = True
 
 
 class SourceInfo(BaseModel):
     doc_id: str
     source_type: str
     source_value: str
+
+
+class RAGStats(BaseModel):
+    document_count: int
+    source_count: int
+    chunk_count: int

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import httpx
 import redis.asyncio as redis
@@ -10,7 +11,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.config import settings
-from app.schemas import AgentRequest, AskRequest, IngestSourceRequest, SourceInfo, StructuredAnswer
+from app.schemas import AgentRequest, AskRequest, IngestSourceRequest, RAGStats, SourceInfo, StructuredAnswer
 from app.services.agent_graph import AgentOrchestrator
 from app.services.cache import CacheService
 from app.services.llm_client import VLLMOpenAIClient
@@ -22,6 +23,7 @@ from app.services.tools import Tool, ToolRegistry
 from app.services.datasource import DataSourceService
 from app.services.knowledge_graph import KnowledgeGraphService
 from app.services.evaluator import AutoEvaluator, AgentQualityEvaluator
+from app.services.document_store import DocumentStore
 from app.services.multi_agent import MultiAgentCoordinator
 from app.domain.windows_it_admin import WINDOWS_IT_ADMIN_SOURCES, WINDOWS_IT_ADMIN_TASKS
 from app.domain.advanced_reasoning import (
@@ -65,7 +67,7 @@ async def lifespan(app: FastAPI):
     evaluator = AutoEvaluator()
     agent_quality_evaluator = AgentQualityEvaluator()
     tools = ToolRegistry()
-    docs_store: dict[str, dict] = {}
+    docs_store = DocumentStore()
 
     async def weather_tool(**kwargs):
         city = kwargs.get("query", "unknown")
@@ -95,18 +97,17 @@ async def lifespan(app: FastAPI):
         )
     )
 
-    # 初始数据源示例，可通过 /datasources/ingest 动态注入并热更新索引
-    docs_store["doc-1"] = {
-        "text": "RAG combines retrieval and generation to reduce hallucination and improve factuality.",
-        "source_type": "inline",
-        "source_value": "bootstrap",
-    }
-    docs_store["doc-2"] = {
-        "text": "vLLM improves throughput via paged KV cache and continuous batching.",
-        "source_type": "inline",
-        "source_value": "bootstrap",
-    }
-    await rag.build_index([(k, v["text"]) for k, v in docs_store.items()])
+    # 启动时尝试加载默认演示知识库目录（中等规模）
+    demo_dir = Path("data/knowledge_base")
+    if demo_dir.exists():
+        demo_result = await datasource.load_many("directory", str(demo_dir), recursive=True)
+        docs_store.bulk_upsert(demo_result.documents, overwrite=False)
+    if docs_store.stats().document_count == 0:
+        docs_store.bulk_upsert([
+            datasource._normalize_doc("inline", "bootstrap", "RAG combines retrieval and generation to reduce hallucination and improve factuality.", title="bootstrap-1", metadata={"section": "bootstrap"}),
+            datasource._normalize_doc("inline", "bootstrap", "vLLM improves throughput via paged KV cache and continuous batching.", title="bootstrap-2", metadata={"section": "bootstrap"}),
+        ])
+    await rag.build_index(docs_store.all_docs_for_index())
 
     async def select_tool(query: str) -> str | None:
         q = query.lower()
@@ -182,7 +183,7 @@ async def lifespan(app: FastAPI):
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=3600)
             except asyncio.TimeoutError:
-                await rag.build_index([(k, v["text"]) for k, v in docs_store.items()])
+                await rag.build_index(docs_store.all_docs_for_index())
 
     task = asyncio.create_task(periodic_rebuild())
     try:
@@ -226,7 +227,7 @@ def get_datasource(request: Request) -> DataSourceService:
     return request.app.state.datasource
 
 
-def get_docs_store(request: Request) -> dict:
+def get_docs_store(request: Request) -> DocumentStore:
     return request.app.state.docs_store
 
 
@@ -258,32 +259,29 @@ async def rebuild_rag(docs: list[tuple[str, str]], rag: RAGService = Depends(get
 
 
 @app.get("/datasources", response_model=list[SourceInfo])
-async def list_datasources(docs_store: dict = Depends(get_docs_store)):
+async def list_datasources(docs_store: DocumentStore = Depends(get_docs_store)):
     return [
-        SourceInfo(doc_id=doc_id, source_type=v["source_type"], source_value=v["source_value"])
-        for doc_id, v in docs_store.items()
+        SourceInfo(doc_id=v["doc_id"], source_type=v["source_type"], source_value=v["source_value"])
+        for v in docs_store.list_sources()
     ]
 
 
 @app.post("/datasources/bootstrap/windows-it-admin")
 async def bootstrap_windows_it_admin(
     datasource: DataSourceService = Depends(get_datasource),
-    docs_store: dict = Depends(get_docs_store),
+    docs_store: DocumentStore = Depends(get_docs_store),
     rag: RAGService = Depends(get_rag),
     kg: KnowledgeGraphService = Depends(get_kg),
 ):
     loaded = []
     for item in WINDOWS_IT_ADMIN_SOURCES:
         doc = await datasource.load(item["source_type"], item["source_value"], doc_id=item["doc_id"])
-        docs_store[doc.doc_id] = {
-            "text": doc.text,
-            "source_type": doc.source_type,
-            "source_value": doc.source_value,
-            "task_tags": item.get("task_tags", []),
-        }
+        doc.metadata.setdefault("tags", item.get("task_tags", []))
+        docs_store.upsert(doc, overwrite=True)
         loaded.append(doc.doc_id)
         await kg.upsert_document(doc.doc_id, doc.source_type, doc.source_value, doc.text)
-    await rag.build_index([(k, v["text"]) for k, v in docs_store.items()])
+    docs_store.persist()
+    await rag.build_index(docs_store.all_docs_for_index())
     return {"ok": True, "loaded_docs": loaded, "tasks": WINDOWS_IT_ADMIN_TASKS}
 
 
@@ -295,22 +293,19 @@ async def windows_it_admin_tasks():
 @app.post("/datasources/bootstrap/advanced-reasoning")
 async def bootstrap_advanced_reasoning(
     datasource: DataSourceService = Depends(get_datasource),
-    docs_store: dict = Depends(get_docs_store),
+    docs_store: DocumentStore = Depends(get_docs_store),
     rag: RAGService = Depends(get_rag),
     kg: KnowledgeGraphService = Depends(get_kg),
 ):
     loaded = []
     for item in ADVANCED_REASONING_SOURCES:
         doc = await datasource.load(item["source_type"], item["source_value"], doc_id=item["doc_id"])
-        docs_store[doc.doc_id] = {
-            "text": doc.text,
-            "source_type": doc.source_type,
-            "source_value": doc.source_value,
-            "task_tags": item.get("task_tags", []),
-        }
+        doc.metadata.setdefault("tags", item.get("task_tags", []))
+        docs_store.upsert(doc, overwrite=True)
         loaded.append(doc.doc_id)
         await kg.upsert_document(doc.doc_id, doc.source_type, doc.source_value, doc.text)
-    await rag.build_index([(k, v["text"]) for k, v in docs_store.items()])
+    docs_store.persist()
+    await rag.build_index(docs_store.all_docs_for_index())
     return {"ok": True, "loaded_docs": loaded, "tasks": ADVANCED_REASONING_TASKS}
 
 
@@ -371,19 +366,44 @@ async def eval_agent_quality(
 async def ingest_datasource(
     req: IngestSourceRequest,
     datasource: DataSourceService = Depends(get_datasource),
-    docs_store: dict = Depends(get_docs_store),
+    docs_store: DocumentStore = Depends(get_docs_store),
     rag: RAGService = Depends(get_rag),
     kg: KnowledgeGraphService = Depends(get_kg),
 ):
-    doc = await datasource.load(req.source_type, req.source_value, doc_id=req.doc_id)
-    docs_store[doc.doc_id] = {
-        "text": doc.text,
-        "source_type": doc.source_type,
-        "source_value": doc.source_value,
+    result = await datasource.load_many(
+        req.source_type,
+        req.source_value,
+        doc_id=req.doc_id,
+        recursive=req.recursive,
+    )
+    if not result.documents:
+        raise HTTPException(status_code=400, detail={"errors": result.errors or [{"error": "no_documents_loaded"}]})
+
+    write_result = docs_store.bulk_upsert(result.documents, overwrite=req.overwrite)
+    await rag.build_index(docs_store.all_docs_for_index())
+    for doc in result.documents:
+        await kg.upsert_document(doc.doc_id, doc.source_type, doc.source_value, doc.text)
+    return {
+        "ok": True,
+        "inserted": write_result["inserted"],
+        "skipped": write_result["skipped"],
+        "total_docs": docs_store.stats().document_count,
+        "errors": result.errors,
     }
-    await rag.build_index([(k, v["text"]) for k, v in docs_store.items()])
-    await kg.upsert_document(doc.doc_id, doc.source_type, doc.source_value, doc.text)
-    return {"ok": True, "doc_id": doc.doc_id, "total_docs": len(docs_store)}
+
+
+@app.get("/rag/stats", response_model=RAGStats)
+async def rag_stats(
+    rag: RAGService = Depends(get_rag),
+    docs_store: DocumentStore = Depends(get_docs_store),
+):
+    rag_snapshot = rag.stats()
+    store_stats = docs_store.stats()
+    return RAGStats(
+        document_count=store_stats.document_count,
+        source_count=store_stats.source_count,
+        chunk_count=rag_snapshot["chunk_count"],
+    )
 
 
 async def _non_stream_answer(req: AskRequest, memory: SessionMemory, cache: CacheService, llm: VLLMOpenAIClient, rag: RAGService, kg: KnowledgeGraphService):

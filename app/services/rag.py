@@ -147,3 +147,8 @@ class RAGService:
             meta["rerank_score"] = float(score)
             out.append(DocumentChunk(doc_id=chunk.doc_id, text=chunk.text, metadata=meta))
         return out
+
+
+    def stats(self) -> dict:
+        snapshot = self._snapshot
+        return {"chunk_count": len(snapshot.chunks), "indexed": bool(snapshot.chunks)}
