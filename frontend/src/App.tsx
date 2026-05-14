@@ -5,6 +5,7 @@ import { DocumentsTable } from './components/DocumentsTable'
 import { KnowledgeIngestPanel } from './components/KnowledgeIngestPanel'
 import { StatusBanner } from './components/StatusBanner'
 import { SystemStatusPanel } from './components/SystemStatusPanel'
+import { AgentTracePanel } from './components/AgentTracePanel'
 import { ApiClient } from './lib/api'
 import type { AgentResponse, AskResponse, CompareResponse, DocumentInfo, IngestResponse, RAGStats, SystemStatus } from './types'
 
@@ -16,7 +17,6 @@ export function App() {
   const [system, setSystem] = useState<SystemStatus | null>(null)
   const [docs, setDocs] = useState<DocumentInfo[]>([])
   const [query, setQuery] = useState('林樱第一次在哪里觉醒灵火？')
-  const [useRag, setUseRag] = useState(true)
   const [showRetrieval, setShowRetrieval] = useState(true)
   const [answer, setAnswer] = useState<AskResponse | null>(null)
   const [agentAnswer, setAgentAnswer] = useState<AgentResponse | null>(null)
@@ -60,11 +60,12 @@ export function App() {
     }
   }
 
-  const ask = async () => {
+  const ask = async (opts: { use_rag: boolean; show_retrieval: boolean }) => {
     setAsking(true)
     try {
-      const out = await api.ask({ session_id: 'demo-session', query, stream: false, use_rag: useRag, show_retrieval: showRetrieval })
+      const out = await api.ask({ session_id: 'demo-session', query, stream: false, use_rag: opts.use_rag, show_retrieval: opts.show_retrieval })
       setAnswer(out)
+      setCompare(null)
       setAgentAnswer(null)
     } catch (err: any) {
       setBanner({ tone: 'error', text: `问答失败：${err.message}` })
@@ -78,6 +79,7 @@ export function App() {
     try {
       const out = await api.compare({ session_id: 'demo-session', query, stream: false, show_retrieval: true })
       setCompare(out)
+      setAnswer(null)
       setAgentAnswer(null)
     } catch (err: any) {
       setBanner({ tone: 'error', text: `对比失败：${err.message}` })
@@ -117,6 +119,12 @@ export function App() {
     refreshAll()
   }, [baseUrl])
 
+  useEffect(() => {
+    setAnswer(null)
+    setCompare(null)
+    setAgentAnswer(null)
+  }, [mode])
+
   return (
     <div className="layout">
       <header className="topbar">
@@ -151,25 +159,24 @@ export function App() {
             query={query}
             setQuery={setQuery}
             useRag={mode === 'rag'}
-            setUseRag={setUseRag}
+            setUseRag={() => {}}
             showRetrieval={showRetrieval}
             setShowRetrieval={setShowRetrieval}
             asking={asking}
             answer={answer}
+            mode={mode}
             onAsk={mode === 'agent' ? runAgent : async () => {
               if (mode === 'ask') {
-                setUseRag(false)
-                await api.ask({ session_id: 'demo-session', query, stream: false, use_rag: false, show_retrieval: false }).then(setAnswer)
+                await ask({ use_rag: false, show_retrieval: false })
               } else if (mode === 'rag') {
-                setUseRag(true)
-                await ask()
+                await ask({ use_rag: true, show_retrieval: true })
               } else {
                 await doCompare()
               }
             }}
           />
-          <ComparePanel comparing={comparing} compare={compare} onCompare={doCompare} />
-          {agentAnswer && <section className="card"><h3>Agent结果</h3><p>{agentAnswer.answer}</p><pre>{JSON.stringify(agentAnswer.metadata, null, 2)}</pre></section>}
+          {mode === 'compare' && <ComparePanel comparing={comparing} compare={compare} onCompare={doCompare} />}
+          {mode === 'agent' && agentAnswer && <AgentTracePanel agent={agentAnswer} />}
         </div>
       </main>
     </div>

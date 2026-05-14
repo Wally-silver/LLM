@@ -254,7 +254,13 @@ class MultiAgentCoordinator:
         answer = final_state.get("shared", {}).get("answer", "")
         if not answer:
             for h in reversed(final_state.get("history", [])):
-                result = h.get("result", {}).get("output", {}).get("result")
+                result = h.get("io", {}).get("output", {}).get("result")
+                if result is None:
+                    result = h.get("result", {}).get("output", {}).get("result")
+                if isinstance(result, dict):
+                    answer = result.get("answer") or str(result)
+                    if answer:
+                        break
                 if isinstance(result, str) and result.strip():
                     answer = result
                     break

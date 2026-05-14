@@ -686,7 +686,7 @@ async def ask(
                 chunks = await rag.retrieve(req.query) if req.use_rag else []
                 kg_related = await kg.search_related(req.query, limit=3) if req.use_rag else []
                 context = "\n".join([f"[{c.doc_id}] {c.text}" for c in chunks] + kg_related) if req.use_rag else ""
-                prompt = build_user_prompt(req.query, context, history)
+                prompt = build_rag_prompt(req.query, context, history) if req.use_rag else build_no_rag_prompt(req.query, history)
                 retrieved = _build_retrieved_hits(chunks, docs_store)
 
                 async def event_stream():
@@ -701,7 +701,7 @@ async def ask(
                         parts.append(token)
                         yield f"data: {json.dumps({'token': token}, ensure_ascii=False)}\n\n"
                     full_answer = "".join(parts)
-                    if req.show_retrieval:
+                    if req.use_rag and req.show_retrieval:
                         yield f"data: {json.dumps({'retrieved_docs': [x.model_dump() for x in retrieved], 'kg_hits': kg_related}, ensure_ascii=False)}\n\n"
                     await memory.add_turn(req.session_id, "user", req.query)
                     await memory.add_turn(req.session_id, "assistant", full_answer)

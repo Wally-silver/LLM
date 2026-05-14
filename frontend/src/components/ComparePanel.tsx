@@ -1,5 +1,6 @@
 import type { CompareResponse } from '../types'
 import { EmptyState } from './EmptyState'
+import { RetrievalMetricsPanel } from './RetrievalMetricsPanel'
 
 type Props = {
   comparing: boolean
@@ -30,6 +31,7 @@ export function ComparePanel({ comparing, compare, onCompare }: Props) {
             </article>
           </div>
           <h4>对比检索片段</h4>
+          <RetrievalMetricsPanel metrics={compare.rag_retrieval_metrics as any} />
           {compare.retrieved_docs.length === 0 ? <EmptyState title="未检索到命中" description="这通常意味着问题太泛化或知识库中不存在该信息。" /> : (
             compare.retrieved_docs.map((hit, i) => (
               <article className="hit" key={`${hit.doc_id}-${i}`}>

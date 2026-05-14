@@ -1,5 +1,6 @@
 import type { AskResponse } from '../types'
 import { EmptyState } from './EmptyState'
+import { RetrievalMetricsPanel } from './RetrievalMetricsPanel'
 
 type Props = {
   query: string
@@ -11,6 +12,7 @@ type Props = {
   asking: boolean
   answer: AskResponse | null
   onAsk: () => Promise<void>
+  mode: 'ask' | 'rag' | 'compare' | 'agent'
 }
 
 const presets = [
@@ -21,18 +23,19 @@ const presets = [
 ]
 
 export function AskPanel(props: Props) {
-  const { query, setQuery, useRag, setUseRag, showRetrieval, setShowRetrieval, asking, answer, onAsk } = props
+  const { query, setQuery, useRag, setUseRag, showRetrieval, setShowRetrieval, asking, answer, onAsk, mode } = props
 
   return (
     <section className="card">
-      <h3>普通问答</h3>
+      <h3>{mode === 'rag' ? 'RAG问答' : mode === 'agent' ? 'Agent任务' : '普通问答'}</h3>
       <div className="preset-row">
         {presets.map(q => <button key={q} className="ghost" onClick={() => setQuery(q)}>{q}</button>)}
       </div>
       <textarea rows={4} value={query} onChange={e => setQuery(e.target.value)} />
       <div className="controls">
-        <label><input type="checkbox" checked={useRag} onChange={e => setUseRag(e.target.checked)} /> 使用 RAG</label>
-        <label><input type="checkbox" checked={showRetrieval} onChange={e => setShowRetrieval(e.target.checked)} /> 显示检索结果</label>
+        {mode === 'rag' && (
+          <label><input type="checkbox" checked={showRetrieval} onChange={e => setShowRetrieval(e.target.checked)} /> 显示检索结果</label>
+        )}
         <button disabled={asking} onClick={onAsk}>{asking ? '生成中...' : '发送'}</button>
       </div>
 
@@ -43,6 +46,7 @@ export function AskPanel(props: Props) {
             <p>{answer.answer}</p>
             <small>latency={answer.latency_ms}ms / cache={String(answer.cache_hit)}</small>
           </div>
+          {mode === 'rag' && <RetrievalMetricsPanel metrics={answer.metadata?.retrieval_metrics as any} />}
           <div>
             <h4>检索结果</h4>
             {answer.retrieved_docs.length === 0 ? <EmptyState title="未检索到片段" description="可尝试更具体问题、提高 top-k 或确认知识库是否导入成功。" /> : (
