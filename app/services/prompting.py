@@ -2,7 +2,7 @@ import hashlib
 import json
 import re
 
-SYSTEM_PROMPT = """你是企业级AI Agent。请基于可验证信息回答，减少幻觉。
+SYSTEM_PROMPT = """你是企业级AI Assistant。
 输出必须是JSON，包含字段：answer, citations, used_tools, metadata。"""
 
 
@@ -21,7 +21,17 @@ def build_user_prompt(query: str, context: str, history: str, tool_result: dict 
 
 
 def build_rag_prompt(query: str, context: str, history: str, tool_result: dict | None = None) -> str:
-    return build_user_prompt(query, context, history, tool_result=tool_result)
+    return (
+        "[历史对话]\n"
+        f"{history}\n\n"
+        "[工具结果]\n"
+        f"{json.dumps(tool_result or {}, ensure_ascii=False)}\n\n"
+        "[知识库检索上下文]\n"
+        f"{context}\n\n"
+        "[用户问题]\n"
+        f"{query}\n\n"
+        "请严格依据知识库检索上下文回答。若上下文不足，请明确说明知识库中没有足够信息。请严格返回JSON对象。"
+    )
 
 
 def build_no_rag_prompt(query: str, history: str, tool_result: dict | None = None) -> str:

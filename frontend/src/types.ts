@@ -17,6 +17,7 @@ export type RAGStats = {
 
 export type SystemStatus = {
   redis: { available: boolean; error: string | null }
+  llm: { provider: string; base_url: string; model_name: string; reachable: boolean; models: string[]; error: string | null }
   neo4j: {
     enabled: boolean
     connected: boolean

@@ -25,10 +25,19 @@ export function SystemStatusPanel({ stats, system, refreshing, onRefresh }: Prop
         </ul>
       )}
       {system && (
+        <>
+        <ul className="kv-list">
+          <li><span>LLM模型</span><b>{system.llm.model_name}</b></li>
+          <li><span>LLM地址</span><b>{system.llm.base_url}</b></li>
+        </ul>
+
         <div className="service-grid">
           <div className={`service-pill ${system.redis.available ? 'ok' : 'warn'}`}>Redis: {system.redis.available ? '可用' : '降级内存'}</div>
           <div className={`service-pill ${system.neo4j.connected ? 'ok' : 'warn'}`}>Neo4j: {system.neo4j.connected ? '已连接' : '未连接'}</div>
+                  <div className={`service-pill ${system.llm.reachable ? "ok" : "warn"}`}>Ollama: {system.llm.reachable ? "已连接" : "未连接"}</div>
+          {system.llm.models?.length > 0 && <div className="service-pill ok">Models: {system.llm.models.join(", ")}</div>}
         </div>
+        </>
       )}
     </section>
   )

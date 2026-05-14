@@ -9,6 +9,7 @@ class AskRequest(BaseModel):
     stream: bool = True
     use_rag: bool = True
     show_retrieval: bool = True
+    use_kg: bool = False
 
 
 class AgentRequest(AskRequest):

@@ -27,10 +27,10 @@ from app.schemas import (
 )
 from app.services.agent_graph import AgentOrchestrator
 from app.services.cache import CacheService
-from app.services.llm_client import VLLMOpenAIClient
+from app.services.llm_client import ModelNotFoundError, VLLMOpenAIClient
 from app.services.memory import SessionMemory
 from app.services.metrics import Metrics
-from app.services.prompting import SYSTEM_PROMPT, build_no_rag_prompt, build_rag_prompt, extract_json, history_fingerprint
+from app.services.prompting import SYSTEM_PROMPT, build_no_rag_prompt, build_rag_prompt, build_user_prompt, extract_json, history_fingerprint
 from app.services.rag import RAGService
 from app.services.tools import Tool, ToolRegistry
 from app.services.datasource import DataSourceService
@@ -168,6 +168,11 @@ async def lifespan(app: FastAPI):
             max_tokens=settings.llm_default_max_tokens,
             response_format={"type": "json_object"},
         )
+
+    print(f"[startup] embedding_model={settings.embedding_model}")
+    print(f"[startup] rerank_model={settings.rerank_model}")
+    print(f"[startup] llm_model_name={settings.llm_model_name}")
+    print(f"[startup] openai_compatible_base_url={settings.openai_compatible_base_url}")
 
     multi_agent = MultiAgentCoordinator(llm=llm, rag=rag, kg=kg, tools=tools)
 
@@ -343,7 +348,11 @@ async def _run_single_answer(
         "top_k": rag.top_k, "retrieved_count": 0, "hit_rate": 0.0, "avg_score": None, "max_score": None, "min_score": None,
         "embedding_latency_ms": 0, "vector_search_latency_ms": 0, "retrieval_latency_ms": 0, "rerank_latency_ms": 0, "total_retrieval_latency_ms": 0,
     })
-    kg_related = await kg.search_related(req.query, limit=3) if use_rag else []
+    kg_related = []
+    if use_rag and req.use_kg:
+        st = kg.status()
+        if st.get("enabled") and st.get("connected"):
+            kg_related = await kg.search_related(req.query, limit=3)
     context = "\n".join([f"[{c.doc_id}] {c.text}" for c in chunks] + kg_related) if use_rag else ""
     prompt = build_rag_prompt(req.query, context, history) if use_rag else build_no_rag_prompt(req.query, history)
     begin = time.perf_counter()
@@ -478,13 +487,11 @@ async def datasets_catalog():
 
 
 @app.get("/system/status")
-async def system_status(request: Request, kg: KnowledgeGraphService = Depends(get_kg)):
+async def system_status(request: Request, kg: KnowledgeGraphService = Depends(get_kg), llm: VLLMOpenAIClient = Depends(get_llm)):
     return {
-        "redis": {
-            "available": bool(request.app.state.redis_available),
-            "error": request.app.state.redis_error,
-        },
+        "redis": {"available": bool(request.app.state.redis_available), "error": request.app.state.redis_error},
         "neo4j": kg.status(),
+        "llm": await llm.probe(),
     }
 
 
@@ -629,7 +636,7 @@ async def _non_stream_answer(
     history = await memory.history_as_text(req.session_id)
     fp = history_fingerprint(history)
     mode = "rag" if req.use_rag else "no_rag"
-    cache_key_query = f"{mode}|show={req.show_retrieval}|{req.query}"
+    cache_key_query = f"{mode}|show={req.show_retrieval}|kg={req.use_kg}|model={settings.llm_model_name}|{req.query}"
 
     cached = await cache.get(req.session_id, cache_key_query, fp)
     if cached:
@@ -684,7 +691,11 @@ async def ask(
             if req.stream:
                 history = await memory.history_as_text(req.session_id)
                 chunks = await rag.retrieve(req.query) if req.use_rag else []
-                kg_related = await kg.search_related(req.query, limit=3) if req.use_rag else []
+                kg_related = []
+                if req.use_rag and req.use_kg:
+                    st = kg.status()
+                    if st.get("enabled") and st.get("connected"):
+                        kg_related = await kg.search_related(req.query, limit=3)
                 context = "\n".join([f"[{c.doc_id}] {c.text}" for c in chunks] + kg_related) if req.use_rag else ""
                 prompt = build_rag_prompt(req.query, context, history) if req.use_rag else build_no_rag_prompt(req.query, history)
                 retrieved = _build_retrieved_hits(chunks, docs_store)
@@ -712,7 +723,9 @@ async def ask(
             return JSONResponse(result)
     except Exception as exc:
         msg = str(exc)
-        if any(x in msg.lower() for x in ["connection refused", "timeout", "ollama", "openai"]):
+        if isinstance(exc, ModelNotFoundError) or "not found" in msg.lower() and "model" in msg.lower():
+            msg = "模型未找到，请检查 LLM_MODEL_NAME 是否与 ollama list 输出一致。"
+        elif any(x in msg.lower() for x in ["connection refused", "timeout", "ollama", "openai"]):
             msg = "LLM backend unavailable，请检查 Ollama 是否启动。"
         raise HTTPException(status_code=500, detail={"code": "ASK_FAILED", "message": msg}) from exc
 
@@ -765,7 +778,9 @@ async def ask_compare(
             )
     except Exception as exc:
         msg = str(exc)
-        if any(x in msg.lower() for x in ["connection refused", "timeout", "ollama", "openai"]):
+        if isinstance(exc, ModelNotFoundError) or "not found" in msg.lower() and "model" in msg.lower():
+            msg = "模型未找到，请检查 LLM_MODEL_NAME 是否与 ollama list 输出一致。"
+        elif any(x in msg.lower() for x in ["connection refused", "timeout", "ollama", "openai"]):
             msg = "LLM backend unavailable，请检查 Ollama 是否启动。"
         raise HTTPException(status_code=500, detail={"code": "COMPARE_FAILED", "message": msg}) from exc
 

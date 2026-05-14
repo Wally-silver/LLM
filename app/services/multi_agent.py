@@ -254,18 +254,21 @@ class MultiAgentCoordinator:
         answer = final_state.get("shared", {}).get("answer", "")
         if not answer:
             for h in reversed(final_state.get("history", [])):
-                result = h.get("io", {}).get("output", {}).get("result")
-                if result is None:
-                    result = h.get("result", {}).get("output", {}).get("result")
-                if isinstance(result, dict):
-                    answer = result.get("answer") or result.get("result") or str(result)
-                    if answer:
-                        break
-                if isinstance(result, str) and result.strip():
-                    answer = result
+                candidates = [
+                    h.get("result", {}).get("answer"),
+                    h.get("io", {}).get("output", {}).get("result", {}).get("answer") if isinstance(h.get("io", {}).get("output", {}).get("result"), dict) else None,
+                    h.get("io", {}).get("output", {}).get("result"),
+                    h.get("result", {}).get("output", {}).get("result"),
+                ]
+                for c in candidates:
+                    if isinstance(c, str) and c.strip():
+                        answer = c.strip(); break
+                    if isinstance(c, dict) and c:
+                        answer = c.get("answer") or str(c); break
+                if answer:
                     break
         if not answer:
-            answer = "任务已执行，但未生成有效结论。"
+            answer = "Agent任务已完成，但没有生成有效总结。"
         reflections = sum(1 for h in final_state.get("history", []) if h.get("transition_decision") == "retry")
         used_tools = [h["step"]["tool_call"]["tool"] for h in final_state.get("history", []) if h.get("step", {}).get("tool_call", {}).get("tool")]
 

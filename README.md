@@ -184,3 +184,9 @@ curl -X POST http://127.0.0.1:8000/ask/compare \
 
 ---
 
+
+
+## 配置优先级与离线模型提示
+- `.env` 优先级高于 `app/config.py` 默认值。
+- 若 `.env` 中 `EMBEDDING_MODEL` / `RERANK_MODEL` 使用 HuggingFace 在线仓库名，离线环境会失败。
+- 离线运行请改为本地模型路径。

@@ -6,6 +6,10 @@ from collections.abc import AsyncGenerator
 import httpx
 
 
+class ModelNotFoundError(RuntimeError):
+    pass
+
+
 class VLLMOpenAIClient:
     """Generic local LLM client.
 
@@ -112,6 +116,8 @@ class VLLMOpenAIClient:
 
         if not stream:
             resp = await self.http_client.post(f"{self.base_url}/api/chat", json=payload)
+            if resp.status_code >= 400 and "model" in resp.text.lower() and "not found" in resp.text.lower():
+                raise ModelNotFoundError("模型未找到，请检查 LLM_MODEL_NAME 是否与 ollama list 输出一致。")
             resp.raise_for_status()
             data = resp.json()
             return data.get("message", {}).get("content", "")
@@ -130,3 +136,19 @@ class VLLMOpenAIClient:
                         break
 
         return streamer()
+
+
+    async def probe(self) -> dict:
+        out = {"provider": self.provider, "base_url": self.base_url, "model_name": self.model_name, "reachable": False, "models": [], "error": None}
+        try:
+            if self.provider == "ollama":
+                resp = await self.http_client.get(f"{self.base_url}/api/tags")
+                resp.raise_for_status()
+                data = resp.json()
+                out["reachable"] = True
+                out["models"] = [m.get("name") for m in data.get("models", []) if m.get("name")]
+            else:
+                out["reachable"] = True
+        except Exception as exc:
+            out["error"] = str(exc)
+        return out
