@@ -168,3 +168,19 @@ curl -X POST http://127.0.0.1:8000/ask/compare \
 - Neo4j 目前以文档节点检索为主，实体/关系抽取可继续增强。
 - 前端为演示型控制台，后续可加鉴权、多用户、图谱可视化。
 - 模型下载依赖网络；离线环境需预热 embedding/reranker 缓存。
+
+
+## 12. Stream 模式说明（重要）
+
+- **前端默认 `stream=false`**，以确保：
+  - `use_rag=false` 与 `use_rag=true` 的行为隔离清晰；
+  - 指标（如 `retrieval_metrics`）在非流式分支稳定返回。
+- 当前 `/ask` 的 `stream=true` 主要用于 token 实时输出（SSE），不包含完整结构化指标聚合。
+- 若你要做 RAG/no-RAG 严格对比或观测检索指标，建议使用：
+  - `/ask` + `stream=false`
+  - `/ask/compare`（内部强制两路都走 `stream=false`，避免串流干扰）
+
+补充：当 `use_rag=false` 时，后端会显式返回空检索指标（`embedding_latency_ms=0`、`vector_search_latency_ms=0` 等），便于前端统一渲染与统计。
+
+---
+

@@ -1,6 +1,32 @@
 import { useState } from 'react'
 import type { AgentResponse } from '../types'
 
+function safeStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return String(value)
+  }
+}
+
+function summarizeOutput(result: any): string {
+  const out = result?.output?.result ?? result
+  if (typeof out === 'string') return out
+  if (out && typeof out === 'object' && typeof out.answer === 'string') return out.answer
+  return safeStringify(out ?? {})
+}
+
+function summarizeInput(historyItem: any): string {
+  const input = historyItem?.result?.input ?? historyItem?.io?.input ?? {}
+  if (typeof input === 'string') return input
+  return safeStringify(input)
+}
+
+function displayAgentName(historyItem: any): string {
+  if (historyItem?.agent) return historyItem.agent
+  return historyItem?.step?.executor || 'executor'
+}
+
 export function AgentTracePanel({ agent }: { agent: AgentResponse }) {
   const [open, setOpen] = useState(false)
   const steps = agent.metadata?.plan?.steps ?? []
@@ -35,10 +61,10 @@ export function AgentTracePanel({ agent }: { agent: AgentResponse }) {
       <h4>History</h4>
       {history.length === 0 ? <p>无执行历史</p> : history.map((h: any, i: number) => (
         <article key={i} className="hit">
-          <div><b>agent:</b> {h.agent ?? 'executor/critic'}</div>
+          <div><b>agent:</b> {displayAgentName(h)}</div>
           <div><b>action:</b> {h.step?.action ?? '-'}</div>
-          <div><b>输入摘要:</b> {JSON.stringify(h.result?.input ?? h.io?.input ?? {}).slice(0, 180)}</div>
-          <div><b>输出摘要:</b> {typeof h.result?.output?.result === 'string' ? h.result.output.result.slice(0, 200) : JSON.stringify(h.result?.output?.result ?? h.io?.output?.result ?? {}).slice(0, 200)}</div>
+          <div><b>输入摘要:</b> {summarizeInput(h)}</div>
+          <div><b>输出摘要:</b> {summarizeOutput(h.result ?? h.io?.output?.result ?? {})}</div>
           <div><b>critic.score:</b> {h.critic?.score ?? '-'}</div>
           <div><b>transition_decision:</b> {h.transition_decision ?? '-'}</div>
           <div><b>retry/replan:</b> {h.transition_decision === 'retry' ? 'retry' : h.transition_decision === 'replan' ? 'replan' : 'none'}</div>

@@ -341,7 +341,7 @@ async def _run_single_answer(
         raise HTTPException(status_code=400, detail={"code": "EMPTY_KB", "message": "知识库为空，请先导入文档。"})
     chunks, retrieval_metrics = await rag.retrieve_with_metrics(req.query) if use_rag else ([], {
         "top_k": rag.top_k, "retrieved_count": 0, "hit_rate": 0.0, "avg_score": None, "max_score": None, "min_score": None,
-        "retrieval_latency_ms": 0, "rerank_latency_ms": 0, "total_retrieval_latency_ms": 0,
+        "embedding_latency_ms": 0, "vector_search_latency_ms": 0, "retrieval_latency_ms": 0, "rerank_latency_ms": 0, "total_retrieval_latency_ms": 0,
     })
     kg_related = await kg.search_related(req.query, limit=3) if use_rag else []
     context = "\n".join([f"[{c.doc_id}] {c.text}" for c in chunks] + kg_related) if use_rag else ""
