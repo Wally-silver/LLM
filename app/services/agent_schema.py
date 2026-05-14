@@ -93,7 +93,11 @@ class AgentIO:
     output: dict = field(default_factory=dict)
 
     @classmethod
-    def from_dict(cls, obj: dict) -> "AgentIO":
+    def from_dict(cls, obj: dict | str | None) -> "AgentIO":
+        if isinstance(obj, str):
+            return cls(input={}, output={"result": obj, "confidence": 0.0, "reasoning": "", "evidence": [], "citations": [], "error": ""})
+        if not isinstance(obj, dict):
+            return cls()
         out = obj.get("output", {}) if isinstance(obj.get("output", {}), dict) else {}
         normalized = {
             "result": out.get("result"),

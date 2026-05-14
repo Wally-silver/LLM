@@ -9,11 +9,18 @@ function safeStringify(value: unknown): string {
   }
 }
 
-function summarizeOutput(result: any): string {
-  const out = result?.output?.result ?? result
-  if (typeof out === 'string') return out
-  if (out && typeof out === 'object' && typeof out.answer === 'string') return out.answer
-  return safeStringify(out ?? {})
+function renderResult(result: any): string {
+  if (!result) return ""
+  if (typeof result === "string") return result
+  if (typeof result === "object") {
+    const outputResult = result?.output && typeof result.output === "object" ? (result.output as any).result : undefined
+    if (typeof result.answer === "string") return result.answer
+    if (typeof result.result === "string") return result.result
+    if (typeof outputResult === "string") return outputResult
+    if (outputResult && typeof outputResult === "object" && typeof (outputResult as any).answer === "string") return (outputResult as any).answer
+    return safeStringify(result)
+  }
+  return String(result)
 }
 
 function summarizeInput(historyItem: any): string {
@@ -64,7 +71,7 @@ export function AgentTracePanel({ agent }: { agent: AgentResponse }) {
           <div><b>agent:</b> {displayAgentName(h)}</div>
           <div><b>action:</b> {h.step?.action ?? '-'}</div>
           <div><b>输入摘要:</b> {summarizeInput(h)}</div>
-          <div><b>输出摘要:</b> {summarizeOutput(h.result ?? h.io?.output?.result ?? {})}</div>
+          <div><b>输出摘要:</b> {renderResult(h?.result ?? h?.io?.output?.result ?? "")}</div>
           <div><b>critic.score:</b> {h.critic?.score ?? '-'}</div>
           <div><b>transition_decision:</b> {h.transition_decision ?? '-'}</div>
           <div><b>retry/replan:</b> {h.transition_decision === 'retry' ? 'retry' : h.transition_decision === 'replan' ? 'replan' : 'none'}</div>

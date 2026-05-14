@@ -2,6 +2,30 @@ from __future__ import annotations
 
 from app.services.agent_graph import AgentOrchestrator
 from app.services.agent_schema import AgentIO, CriticResult, Plan, PlanStep, ToolCall
+
+import json
+
+
+def safe_get(obj, key, default=None):
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return default
+
+
+def normalize_step_result(result):
+    if result is None:
+        return ""
+    if isinstance(result, str):
+        return result.strip()
+    if isinstance(result, dict):
+        return (
+            safe_get(result, "answer")
+            or safe_get(result, "result")
+            or safe_get(result, "output")
+            or json.dumps(result, ensure_ascii=False)
+        )
+    return str(result)
+
 from app.services.prompting import (
     SYSTEM_PROMPT,
     build_executor_prompt,
@@ -174,10 +198,10 @@ class MultiAgentCoordinator:
         )
 
     async def _critic(self, step: PlanStep, io: AgentIO, state: dict) -> CriticResult:
-        out = io.output
-        has_result = bool(out.get("result"))
-        has_error = bool(out.get("error"))
-        has_evidence = bool(out.get("evidence"))
+        out = io.output if isinstance(io.output, dict) else {}
+        has_result = bool(safe_get(out, "result"))
+        has_error = bool(safe_get(out, "error"))
+        has_evidence = bool(safe_get(out, "evidence"))
 
         if has_error:
             return CriticResult(
@@ -251,20 +275,19 @@ class MultiAgentCoordinator:
 
         final_state = await orchestrator.run(query, max_reflections=self.max_reflections, max_replans=self.max_replans)
         plan = final_state.get("plan", {})
-        answer = final_state.get("shared", {}).get("answer", "")
+        answer = normalize_step_result(safe_get(safe_get(final_state, "shared", {}), "answer", ""))
         if not answer:
-            for h in reversed(final_state.get("history", [])):
+            for h in reversed(safe_get(final_state, "history", []) or []):
                 candidates = [
-                    h.get("result", {}).get("answer"),
-                    h.get("io", {}).get("output", {}).get("result", {}).get("answer") if isinstance(h.get("io", {}).get("output", {}).get("result"), dict) else None,
-                    h.get("io", {}).get("output", {}).get("result"),
-                    h.get("result", {}).get("output", {}).get("result"),
+                    safe_get(safe_get(safe_get(h, "io", {}), "output", {}), "result"),
+                    safe_get(safe_get(h, "result", {}), "output", {}),
+                    safe_get(h, "result"),
                 ]
                 for c in candidates:
-                    if isinstance(c, str) and c.strip():
-                        answer = c.strip(); break
-                    if isinstance(c, dict) and c:
-                        answer = c.get("answer") or str(c); break
+                    text = normalize_step_result(c)
+                    if text:
+                        answer = text
+                        break
                 if answer:
                     break
         if not answer:
