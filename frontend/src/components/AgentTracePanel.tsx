@@ -24,8 +24,10 @@ export function AgentTracePanel({ agent }: { agent: AgentResponse }) {
           <div><b>transition_decision:</b> {h.transition_decision ?? '-'}</div>
         </article>
       ))}
-      <button className="ghost" onClick={() => setOpen(v => !v)}>{open ? '收起原始JSON' : '展开原始JSON'}</button>
-      {open && <pre>{JSON.stringify(agent.metadata, null, 2)}</pre>}
+      <details open={open} onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}>
+        <summary>{open ? '收起原始JSON' : '展开原始JSON'}</summary>
+        <pre>{JSON.stringify(agent.metadata, null, 2)}</pre>
+      </details>
     </section>
   )
 }

@@ -5,8 +5,6 @@ import { RetrievalMetricsPanel } from './RetrievalMetricsPanel'
 type Props = {
   query: string
   setQuery: (q: string) => void
-  useRag: boolean
-  setUseRag: (v: boolean) => void
   showRetrieval: boolean
   setShowRetrieval: (v: boolean) => void
   asking: boolean
@@ -23,11 +21,11 @@ const presets = [
 ]
 
 export function AskPanel(props: Props) {
-  const { query, setQuery, useRag, setUseRag, showRetrieval, setShowRetrieval, asking, answer, onAsk, mode } = props
+  const { query, setQuery, showRetrieval, setShowRetrieval, asking, answer, onAsk, mode } = props
 
   return (
     <section className="card">
-      <h3>{mode === 'rag' ? 'RAG问答' : mode === 'agent' ? 'Agent任务' : '普通问答'}</h3>
+      <h3>{mode === 'rag' ? 'RAG知识库问答' : mode === 'agent' ? 'Agent任务执行' : '普通问答'}</h3>
       <div className="preset-row">
         {presets.map(q => <button key={q} className="ghost" onClick={() => setQuery(q)}>{q}</button>)}
       </div>

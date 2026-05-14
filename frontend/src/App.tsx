@@ -129,19 +129,19 @@ export function App() {
     <div className="layout">
       <header className="topbar">
         <div>
-          <h1>小说型 RAG 对比演示系统</h1>
+          <h1>Novel RAG Agent Console</h1>
           <p>导入你的小说全文，直接对比「不开 RAG」与「开 RAG」回答差异。</p>
         </div>
         <div className="top-controls">
           <label>API Base URL</label>
           <input value={baseUrl} onChange={e => setBaseUrl(e.target.value)} />
           <button disabled={refreshing} onClick={refreshAll}>{refreshing ? '刷新中...' : '刷新'}</button>
-          <select value={mode} onChange={e => setMode(e.target.value as any)}>
-            <option value="ask">普通问答</option>
-            <option value="rag">RAG问答</option>
-            <option value="compare">RAG对比</option>
-            <option value="agent">Agent任务</option>
-          </select>
+          <div className="mode-tabs">
+            <button className={mode === 'ask' ? 'tab active' : 'tab'} onClick={() => setMode('ask')}>普通问答</button>
+            <button className={mode === 'rag' ? 'tab active' : 'tab'} onClick={() => setMode('rag')}>RAG问答</button>
+            <button className={mode === 'compare' ? 'tab active' : 'tab'} onClick={() => setMode('compare')}>RAG对比</button>
+            <button className={mode === 'agent' ? 'tab active' : 'tab'} onClick={() => setMode('agent')}>Agent任务</button>
+          </div>
         </div>
       </header>
 
@@ -158,8 +158,6 @@ export function App() {
           <AskPanel
             query={query}
             setQuery={setQuery}
-            useRag={mode === 'rag'}
-            setUseRag={() => {}}
             showRetrieval={showRetrieval}
             setShowRetrieval={setShowRetrieval}
             asking={asking}
