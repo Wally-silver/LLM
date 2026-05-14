@@ -63,7 +63,7 @@ export function App() {
   const ask = async (opts: { use_rag: boolean; show_retrieval: boolean }) => {
     setAsking(true)
     try {
-      const out = await api.ask({ session_id: 'demo-session', query, stream: false, use_rag: opts.use_rag, show_retrieval: opts.show_retrieval })
+      const out = await api.ask({ session_id: opts.use_rag ? 'demo-session' : 'demo-session:plain', query, stream: false, use_rag: opts.use_rag, show_retrieval: opts.show_retrieval })
       setAnswer(out)
       setCompare(null)
       setAgentAnswer(null)

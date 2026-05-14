@@ -292,8 +292,14 @@ class MultiAgentCoordinator:
                     break
         if not answer:
             answer = "Agent任务已完成，但没有生成有效总结。"
-        reflections = sum(1 for h in final_state.get("history", []) if h.get("transition_decision") == "retry")
-        used_tools = [h["step"]["tool_call"]["tool"] for h in final_state.get("history", []) if h.get("step", {}).get("tool_call", {}).get("tool")]
+        reflections = sum(1 for h in (final_state.get("history", []) or []) if safe_get(h, "transition_decision") == "retry")
+        used_tools = []
+        for h in (final_state.get("history", []) or []):
+            step = safe_get(h, "step", {})
+            tool_call = safe_get(step, "tool_call", {})
+            tool = safe_get(tool_call, "tool")
+            if tool:
+                used_tools.append(tool)
 
         return {
             "task_type": "autonomous_agent",

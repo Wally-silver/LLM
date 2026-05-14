@@ -92,6 +92,8 @@ export type AskResponse = {
       avg_score?: number | null
       max_score?: number | null
       min_score?: number | null
+      embedding_latency_ms: number
+      vector_search_latency_ms: number
       retrieval_latency_ms: number
       rerank_latency_ms: number
       total_retrieval_latency_ms: number

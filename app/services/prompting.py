@@ -42,7 +42,7 @@ def build_no_rag_prompt(query: str, history: str, tool_result: dict | None = Non
         f"{json.dumps(tool_result or {}, ensure_ascii=False)}\n\n"
         "[用户问题]\n"
         f"{query}\n\n"
-        "请基于你的通用知识回答，不要假设存在外部检索上下文。请严格返回JSON对象。"
+        "请基于你的通用知识回答，不要假设存在外部检索上下文。当前为普通问答模式，请不要引用或假设存在检索上下文；如历史回答中出现知识库内容，仅作为对话历史参考，不作为当前检索依据。请严格返回JSON对象。"
     )
 
 
