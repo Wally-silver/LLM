@@ -84,4 +84,12 @@ export class ApiClient {
   rebuildRag() {
     return this.post<{ ok: boolean; docs: number }>('/rag/rebuild', {})
   }
+
+  bootstrapAdvancedReasoning() {
+    return this.post<{ ok: boolean; loaded_docs: string[] }>('/datasources/bootstrap/advanced-reasoning', {})
+  }
+
+  bootstrapWindowsItAdmin() {
+    return this.post<{ ok: boolean; loaded_docs: string[] }>('/datasources/bootstrap/windows-it-admin', {})
+  }
 }

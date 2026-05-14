@@ -17,7 +17,7 @@ class AgentRequest(AskRequest):
 
 class StructuredAnswer(BaseModel):
     answer: str
-    citations: list[str] = Field(default_factory=list)
+    citations: list["Citation"] = Field(default_factory=list)
     used_tools: list[str] = Field(default_factory=list)
     latency_ms: int
     cache_hit: bool
@@ -87,6 +87,8 @@ class RetrievalMetrics(BaseModel):
     avg_score: float | None = None
     max_score: float | None = None
     min_score: float | None = None
+    embedding_latency_ms: int = 0
+    vector_search_latency_ms: int = 0
     retrieval_latency_ms: int = 0
     rerank_latency_ms: int = 0
     total_retrieval_latency_ms: int = 0

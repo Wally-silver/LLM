@@ -102,6 +102,19 @@ export function App() {
     }
   }
 
+  const loadDemoDatasets = async () => {
+    setIngesting(true)
+    try {
+      await Promise.all([api.bootstrapAdvancedReasoning(), api.bootstrapWindowsItAdmin()])
+      setBanner({ tone: 'success', text: '示例数据集加载完成' })
+      await refreshAll()
+    } catch (err: any) {
+      setBanner({ tone: 'error', text: `加载示例数据失败：${err.message}` })
+    } finally {
+      setIngesting(false)
+    }
+  }
+
   const deleteDocument = async (docId: string) => {
     setDeletingId(docId)
     try {
@@ -120,9 +133,19 @@ export function App() {
   }, [baseUrl])
 
   useEffect(() => {
-    setAnswer(null)
-    setCompare(null)
-    setAgentAnswer(null)
+    if (mode === 'ask' || mode === 'rag') {
+      setCompare(null)
+      setAgentAnswer(null)
+    } else if (mode === 'compare') {
+      setAnswer(null)
+      setAgentAnswer(null)
+    } else {
+      setAnswer(null)
+      setCompare(null)
+    }
+    setBanner(null)
+    setAsking(false)
+    setComparing(false)
   }, [mode])
 
   return (
@@ -130,12 +153,13 @@ export function App() {
       <header className="topbar">
         <div>
           <h1>Novel RAG Agent Console</h1>
-          <p>导入你的小说全文，直接对比「不开 RAG」与「开 RAG」回答差异。</p>
+          <p>本地知识库 + RAG + Agent + Neo4j + Ollama</p>
         </div>
         <div className="top-controls">
           <label>API Base URL</label>
           <input value={baseUrl} onChange={e => setBaseUrl(e.target.value)} />
           <button disabled={refreshing} onClick={refreshAll}>{refreshing ? '刷新中...' : '刷新'}</button>
+          <button className="ghost" disabled={ingesting} onClick={loadDemoDatasets}>{ingesting ? '加载中...' : '加载示例数据集'}</button>
           <div className="mode-tabs">
             <button className={mode === 'ask' ? 'tab active' : 'tab'} onClick={() => setMode('ask')}>普通问答</button>
             <button className={mode === 'rag' ? 'tab active' : 'tab'} onClick={() => setMode('rag')}>RAG问答</button>
@@ -167,13 +191,13 @@ export function App() {
               if (mode === 'ask') {
                 await ask({ use_rag: false, show_retrieval: false })
               } else if (mode === 'rag') {
-                await ask({ use_rag: true, show_retrieval: true })
+                await ask({ use_rag: true, show_retrieval: showRetrieval })
               } else {
                 await doCompare()
               }
             }}
           />
-          {mode === 'compare' && <ComparePanel comparing={comparing} compare={compare} onCompare={doCompare} />}
+          {mode === 'compare' && <ComparePanel compare={compare} />}
           {mode === 'agent' && agentAnswer && <AgentTracePanel agent={agentAnswer} />}
         </div>
       </main>

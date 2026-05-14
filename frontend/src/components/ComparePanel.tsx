@@ -3,18 +3,13 @@ import { EmptyState } from './EmptyState'
 import { RetrievalMetricsPanel } from './RetrievalMetricsPanel'
 
 type Props = {
-  comparing: boolean
   compare: CompareResponse | null
-  onCompare: () => Promise<void>
 }
 
-export function ComparePanel({ comparing, compare, onCompare }: Props) {
+export function ComparePanel({ compare }: Props) {
   return (
     <section className="card">
-      <div className="card-header">
-        <h3>RAG 对比（核心演示）</h3>
-        <button disabled={comparing} onClick={onCompare}>{comparing ? '对比中...' : '执行对比'}</button>
-      </div>
+      <div className="card-header"><h3>RAG 对比（核心演示）</h3></div>
 
       {!compare ? <EmptyState title="暂无对比结果" description="先在上方输入问题，然后点击执行对比。" /> : (
         <>

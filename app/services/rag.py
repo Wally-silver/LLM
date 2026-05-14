@@ -148,22 +148,93 @@ class RAGService:
         return await asyncio.to_thread(self._retrieve_sync, snapshot, query, top_k)
 
     async def retrieve_with_metrics(self, query: str, top_k: int | None = None) -> tuple[list[DocumentChunk], dict]:
-        begin = time.perf_counter()
-        chunks = await self.retrieve(query, top_k=top_k)
-        elapsed = int((time.perf_counter() - begin) * 1000)
-        scores = [float(c.metadata.get("rerank_score")) for c in chunks if c.metadata.get("rerank_score") is not None]
+        async with self._rw_lock:
+            snapshot = self._snapshot
+        if not snapshot.chunks:
+            k = top_k or self.top_k
+            return [], {
+                "top_k": k,
+                "retrieved_count": 0,
+                "hit_rate": 0.0,
+                "avg_score": None,
+                "max_score": None,
+                "min_score": None,
+                "embedding_latency_ms": 0,
+                "vector_search_latency_ms": 0,
+                "retrieval_latency_ms": 0,
+                "rerank_latency_ms": 0,
+                "total_retrieval_latency_ms": 0,
+            }
+        return await asyncio.to_thread(self._retrieve_sync_with_metrics, snapshot, query, top_k)
+
+    def _retrieve_sync_with_metrics(self, snapshot: RAGSnapshot, query: str, top_k: int | None) -> tuple[list[DocumentChunk], dict]:
+        self._ensure_models()
+        import numpy as np
+
+        total_begin = time.perf_counter()
         k = top_k or self.top_k
-        avg_score = (sum(scores) / len(scores)) if scores else None
-        return chunks, {
+        rewritten = self.query_rewrite(query)
+
+        emb_begin = time.perf_counter()
+        q = self.embedder.encode([rewritten], normalize_embeddings=True)
+        qv = np.asarray(q, dtype="float32")
+        embedding_latency_ms = int((time.perf_counter() - emb_begin) * 1000)
+
+        vector_begin = time.perf_counter()
+        if snapshot.index is not None:
+            _, indices = snapshot.index.search(qv, k)
+            candidates = [snapshot.chunks[i] for i in indices[0] if i >= 0]
+        else:
+            sims = (snapshot.emb_matrix @ qv[0]).tolist()
+            order = sorted(range(len(sims)), key=lambda i: sims[i], reverse=True)[:k]
+            candidates = [snapshot.chunks[i] for i in order]
+        vector_search_latency_ms = int((time.perf_counter() - vector_begin) * 1000)
+
+        if not candidates:
+            total_ms = int((time.perf_counter() - total_begin) * 1000)
+            return [], {
+                "top_k": k,
+                "retrieved_count": 0,
+                "hit_rate": 0.0,
+                "avg_score": None,
+                "max_score": None,
+                "min_score": None,
+                "embedding_latency_ms": embedding_latency_ms,
+                "vector_search_latency_ms": vector_search_latency_ms,
+                "retrieval_latency_ms": vector_search_latency_ms,
+                "rerank_latency_ms": 0,
+                "total_retrieval_latency_ms": total_ms,
+            }
+
+        rerank_begin = time.perf_counter()
+        pairs = [(rewritten, c.text) for c in candidates]
+        scores = self.reranker.predict(pairs)
+        rerank_latency_ms = int((time.perf_counter() - rerank_begin) * 1000)
+
+        ranked = sorted(zip(candidates, scores), key=lambda x: x[1], reverse=True)
+        out: list[DocumentChunk] = []
+        score_vals: list[float] = []
+        for chunk, score in ranked:
+            s = float(score)
+            score_vals.append(s)
+            meta = dict(chunk.metadata)
+            meta["rerank_score"] = s
+            out.append(DocumentChunk(doc_id=chunk.doc_id, text=chunk.text, metadata=meta))
+
+        total_ms = int((time.perf_counter() - total_begin) * 1000)
+        avg_score = (sum(score_vals) / len(score_vals)) if score_vals else None
+        return out, {
             "top_k": k,
-            "retrieved_count": len(chunks),
-            "hit_rate": round((len(chunks) / k), 4) if k else 0.0,
+            "retrieved_count": len(out),
+            "hit_rate": round((len(out) / k), 4) if k else 0.0,
             "avg_score": avg_score,
-            "max_score": max(scores) if scores else None,
-            "min_score": min(scores) if scores else None,
-            "retrieval_latency_ms": elapsed,
-            "rerank_latency_ms": 0,
-            "total_retrieval_latency_ms": elapsed,
+            "max_score": max(score_vals) if score_vals else None,
+            "min_score": min(score_vals) if score_vals else None,
+            "embedding_latency_ms": embedding_latency_ms,
+            "vector_search_latency_ms": vector_search_latency_ms,
+            "retrieval_latency_ms": vector_search_latency_ms,
+            "rerank_latency_ms": rerank_latency_ms,
+            "total_retrieval_latency_ms": total_ms,
         }
 
     def _retrieve_sync(self, snapshot: RAGSnapshot, query: str, top_k: int | None) -> list[DocumentChunk]:

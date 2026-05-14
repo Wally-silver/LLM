@@ -8,7 +8,7 @@ body { margin: 0; background: #f3f5f9; }
 .top-controls input { width: 100%; margin: 6px 0; }
 .mode-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 6px; }
 .tab { background: #f3f5fa; color: #344457; border: 1px solid #d9e1ed; }
-.tab.active { background: #1e66f5; color: #fff; border-color: #1e66f5; }
+.tab.active { background: #1e66f5; color: #fff; border-color: #1e66f5; box-shadow: 0 0 0 3px rgba(30,102,245,.2); }
 .status-banner { padding: 10px 14px; border-radius: 8px; margin-bottom: 12px; font-weight: 600; }
 .status-banner.success { background: #e8f8ee; color: #206a3a; }
 .status-banner.error { background: #ffeaea; color: #9e2e2e; }
@@ -36,6 +36,8 @@ button.ghost { background: #eef2ff; color: #2f4fb7; margin-right: 6px; margin-bo
 .compare-grid { display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 10px; }
 .hit { border: 1px solid #e5e8f0; border-radius: 10px; padding: 8px; margin-bottom: 8px; background: #fcfdff; }
 .hit-head { display: flex; gap: 8px; align-items: center; }
+.score-badge { background: #ecf3ff; color: #1e66f5; border-radius: 999px; padding: 2px 8px; font-weight: 700; }
+.snippet { max-height: 90px; overflow: auto; }
 .tag { display: inline-block; background: #f1ecff; color: #4e35a7; border-radius: 999px; padding: 2px 8px; font-size: 12px; }
 .empty-state { padding: 14px; border: 1px dashed #d4dcea; border-radius: 10px; text-align: center; color: #576273; }
 .metrics-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }

@@ -25,7 +25,7 @@ export function AskPanel(props: Props) {
 
   return (
     <section className="card">
-      <h3>{mode === 'rag' ? 'RAG知识库问答' : mode === 'agent' ? 'Agent任务执行' : '普通问答'}</h3>
+      <h3>{mode === 'rag' ? 'RAG 知识库问答' : mode === 'agent' ? 'Agent 多阶段任务执行' : mode === 'compare' ? 'RAG 效果对比' : 'LLM 普通问答'}</h3>
       <div className="preset-row">
         {presets.map(q => <button key={q} className="ghost" onClick={() => setQuery(q)}>{q}</button>)}
       </div>
@@ -45,22 +45,37 @@ export function AskPanel(props: Props) {
             <small>latency={answer.latency_ms}ms / cache={String(answer.cache_hit)}</small>
           </div>
           {mode === 'rag' && <RetrievalMetricsPanel metrics={answer.metadata?.retrieval_metrics as any} />}
+          {mode === 'rag' && (
           <div>
             <h4>检索结果</h4>
             {answer.retrieved_docs.length === 0 ? <EmptyState title="未检索到片段" description="可尝试更具体问题、提高 top-k 或确认知识库是否导入成功。" /> : (
               answer.retrieved_docs.map((hit, i) => (
-                <article className="hit" key={`${hit.doc_id}-${i}`}>
-                  <div className="hit-head">
+                <details className="hit" key={`${hit.doc_id}-${i}`}>
+                  <summary className="hit-head">
                     <b>{hit.title || hit.doc_id}</b>
                     <span>{hit.source_type}</span>
-                    <span>{hit.score?.toFixed(3) ?? '-'}</span>
-                  </div>
+                    <span className="score-badge">{hit.score?.toFixed(3) ?? '-'}</span>
+                  </summary>
                   <small>{hit.source_value}</small>
-                  <p>{hit.snippet}</p>
-                </article>
+                  <p className="snippet">{hit.snippet}</p>
+                </details>
               ))
             )}
           </div>
+          )}
+          {mode === 'rag' && (
+          <div>
+            <h4>引用</h4>
+            {answer.citations.length === 0 ? <EmptyState title="暂无引用" description="模型未返回引用信息。" /> : answer.citations.map((c, i) => (
+              <article className="hit" key={i}>
+                <b>{c.title || '未命名引用'}</b>
+                <p className="snippet">{c.snippet || '-'}</p>
+                <small>source_id: {c.source_id || '-'}</small> <small>score: {c.score ?? '-'}</small>
+                {c.url ? <div><a href={c.url} target="_blank">打开来源</a></div> : null}
+              </article>
+            ))}
+          </div>
+          )}
         </div>
       )}
     </section>

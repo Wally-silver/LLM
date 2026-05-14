@@ -258,7 +258,7 @@ class MultiAgentCoordinator:
                 if result is None:
                     result = h.get("result", {}).get("output", {}).get("result")
                 if isinstance(result, dict):
-                    answer = result.get("answer") or str(result)
+                    answer = result.get("answer") or result.get("result") or str(result)
                     if answer:
                         break
                 if isinstance(result, str) and result.strip():
