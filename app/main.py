@@ -324,6 +324,16 @@ def _build_retrieved_hits(chunks, docs_store: DocumentStore) -> list[RetrievedHi
     return hits
 
 
+def kg_hits_to_texts(kg_hits):
+    texts = []
+    for x in (kg_hits or []):
+        if isinstance(x, dict):
+            texts.append(str(x.get("text") or x))
+        else:
+            texts.append(str(x))
+    return texts
+
+
 def _normalize_citations(raw) -> list[Citation]:
     out: list[Citation] = []
     if not raw:
@@ -365,11 +375,23 @@ async def _run_single_answer(
     kg_status = {"enabled": False, "connected": False, "message": "Neo4j is not connected or KG tool is not configured."}
     if req.use_kg:
         st = kg.status()
-        kg_status = {"enabled": bool(st.get("enabled")), "connected": bool(st.get("connected")), "message": "KG tool not configured." if st.get("connected") else "Neo4j is not connected or KG tool is not configured."}
-        if use_rag and st.get("enabled") and st.get("connected"):
+        kg_status = {"enabled": bool(st.get("enabled")), "connected": bool(st.get("connected")), "message": "KG tool enabled." if st.get("connected") else "Neo4j is not connected or KG tool is not configured."}
+        if st.get("enabled") and st.get("connected"):
             kg_related = await kg.search_related(req.query, limit=3)
-    context = "\n".join([f"[{c.doc_id}] {c.text}" for c in chunks] + kg_related) if use_rag else ""
-    prompt = build_rag_prompt(req.query, context, history) if use_rag else build_no_rag_prompt(req.query, history)
+    rag_texts = [f"[{c.doc_id}] {c.text}" for c in chunks]
+    kg_texts = kg_hits_to_texts(kg_related)
+    if use_rag and req.use_kg:
+        context = "\n".join(rag_texts + kg_texts)
+        prompt = build_rag_prompt(f"[GraphRAG] {req.query}", context, history)
+    elif use_rag:
+        context = "\n".join(rag_texts)
+        prompt = build_rag_prompt(req.query, context, history)
+    elif req.use_kg:
+        context = "\n".join(kg_texts)
+        prompt = build_rag_prompt(f"[KG] {req.query}", context, history)
+    else:
+        context = ""
+        prompt = build_no_rag_prompt(req.query, history)
     begin = time.perf_counter()
     output = await llm.complete(
         SYSTEM_PROMPT,
@@ -385,7 +407,7 @@ async def _run_single_answer(
         use_rag=use_rag,
         rag_context=context if req.show_retrieval else "",
         retrieved_docs=_build_retrieved_hits(chunks, docs_store) if req.show_retrieval else [],
-        kg_hits=[x.get("text", str(x)) if isinstance(x, dict) else str(x) for x in kg_related] if req.show_retrieval else [],
+        kg_hits=kg_hits_to_texts(kg_related) if req.show_retrieval else [],
         citations=_normalize_citations(parsed.get("citations", []) if use_rag else []),
         used_tools=((parsed.get("used_tools", []) if isinstance(parsed.get("used_tools", []), list) else []) + (["rag_search"] if use_rag else []) + (["kg_search"] if req.use_kg and kg_related else [])),
         latency_ms=elapsed,
@@ -503,10 +525,12 @@ async def datasets_catalog():
 
 @app.get("/system/status")
 async def system_status(request: Request, kg: KnowledgeGraphService = Depends(get_kg), llm: VLLMOpenAIClient = Depends(get_llm)):
+    kg_state = kg.status()
+    connected = bool(kg_state.get("connected"))
     return {
         "redis": {"available": bool(request.app.state.redis_available), "error": request.app.state.redis_error},
-        "neo4j": kg.status(),
-        "kg_tool": {"enabled": False, "message": "KG tool not configured."},
+        "neo4j": kg_state,
+        "kg_tool": {"enabled": connected, "message": "KG tool enabled." if connected else "Neo4j is not connected or KG tool is unavailable.", "schema_available": connected},
         "llm": await llm.probe(),
     }
 
@@ -720,12 +744,24 @@ async def ask(
                 history = await memory.history_as_text(req.session_id)
                 chunks = await rag.retrieve(req.query) if req.use_rag else []
                 kg_related = []
-                if req.use_rag and req.use_kg:
+                if req.use_kg:
                     st = kg.status()
                     if st.get("enabled") and st.get("connected"):
                         kg_related = await kg.search_related(req.query, limit=3)
-                context = "\n".join([f"[{c.doc_id}] {c.text}" for c in chunks] + kg_related) if req.use_rag else ""
-                prompt = build_rag_prompt(req.query, context, history) if req.use_rag else build_no_rag_prompt(req.query, history)
+                rag_texts = [f"[{c.doc_id}] {c.text}" for c in chunks]
+                kg_texts = kg_hits_to_texts(kg_related)
+                if req.use_rag and req.use_kg:
+                    context = "\n".join(rag_texts + kg_texts)
+                    prompt = build_rag_prompt(f"[GraphRAG] {req.query}", context, history)
+                elif req.use_rag:
+                    context = "\n".join(rag_texts)
+                    prompt = build_rag_prompt(req.query, context, history)
+                elif req.use_kg:
+                    context = "\n".join(kg_texts)
+                    prompt = build_rag_prompt(f"[KG] {req.query}", context, history)
+                else:
+                    context = ""
+                    prompt = build_no_rag_prompt(req.query, history)
                 retrieved = _build_retrieved_hits(chunks, docs_store)
 
                 async def event_stream():

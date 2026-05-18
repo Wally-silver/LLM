@@ -12,6 +12,16 @@ def safe_get(obj, key, default=None):
     return default
 
 
+def kg_hits_to_texts(kg_hits):
+    texts = []
+    for x in (kg_hits or []):
+        if isinstance(x, dict):
+            texts.append(str(x.get("text") or x))
+        else:
+            texts.append(str(x))
+    return texts
+
+
 def normalize_step_result(result):
     if result is None:
         return ""
@@ -135,7 +145,7 @@ class MultiAgentCoordinator:
                 chunks = await self.rag.retrieve(query)
                 evidence.extend([f"[{c.doc_id}] {c.text}" for c in chunks])
                 kg_related = await self.kg.search_related(query, limit=5)
-                evidence.extend(kg_related)
+                evidence.extend(kg_hits_to_texts(kg_related))
                 shared["evidence"] = evidence
                 shared["context"] = "\n".join(evidence)
             except Exception as exc:
