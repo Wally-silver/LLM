@@ -59,6 +59,7 @@ export type SystemStatus = {
   redis: { available: boolean; error: string | null }
   llm: { provider: string; base_url: string; model_name: string; reachable: boolean; models: string[]; error: string | null }
   neo4j: { enabled: boolean; connected: boolean; error: string | null; uri: string; database: string }
+  kg_tool?: { enabled: boolean; message: string }
 }
 export type DocumentInfo = { doc_id: string; title?: string; source_type: string; source_value: string; metadata?: Record<string, unknown> }
 export type DocumentsResponse = { documents: DocumentInfo[] }

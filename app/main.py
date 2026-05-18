@@ -362,9 +362,11 @@ async def _run_single_answer(
         "embedding_latency_ms": 0, "vector_search_latency_ms": 0, "retrieval_latency_ms": 0, "rerank_latency_ms": 0, "total_retrieval_latency_ms": 0,
     })
     kg_related = []
-    if use_rag and req.use_kg:
+    kg_status = {"enabled": False, "connected": False, "message": "Neo4j is not connected or KG tool is not configured."}
+    if req.use_kg:
         st = kg.status()
-        if st.get("enabled") and st.get("connected"):
+        kg_status = {"enabled": bool(st.get("enabled")), "connected": bool(st.get("connected")), "message": "KG tool not configured." if st.get("connected") else "Neo4j is not connected or KG tool is not configured."}
+        if use_rag and st.get("enabled") and st.get("connected"):
             kg_related = await kg.search_related(req.query, limit=3)
     context = "\n".join([f"[{c.doc_id}] {c.text}" for c in chunks] + kg_related) if use_rag else ""
     prompt = build_rag_prompt(req.query, context, history) if use_rag else build_no_rag_prompt(req.query, history)
@@ -387,7 +389,7 @@ async def _run_single_answer(
         citations=_normalize_citations(parsed.get("citations", []) if use_rag else []),
         used_tools=(parsed.get("used_tools", []) if isinstance(parsed.get("used_tools", []), list) else []),
         latency_ms=elapsed,
-        metadata={**parsed.get("metadata", {}), "retrieval_metrics": retrieval_metrics},
+        metadata={**parsed.get("metadata", {}), "retrieval_metrics": retrieval_metrics, "kg_status": kg_status},
     )
 
 
@@ -504,6 +506,7 @@ async def system_status(request: Request, kg: KnowledgeGraphService = Depends(ge
     return {
         "redis": {"available": bool(request.app.state.redis_available), "error": request.app.state.redis_error},
         "neo4j": kg.status(),
+        "kg_tool": {"enabled": False, "message": "KG tool not configured."},
         "llm": await llm.probe(),
     }
 

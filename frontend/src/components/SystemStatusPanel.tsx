@@ -36,6 +36,8 @@ export function SystemStatusPanel({ stats, system, refreshing, onRefresh }: Prop
           <div className={`service-pill ${system.neo4j.connected ? 'ok' : 'warn'}`}>Neo4j: {system.neo4j.connected ? '已连接' : '未连接'}</div>
                   <div className={`service-pill ${system.llm.reachable ? "ok" : "warn"}`}>Ollama: {system.llm.reachable ? "已连接" : "未连接"}</div>
           {system.llm.models?.length > 0 && <div className="service-pill ok">Models: {system.llm.models.join(", ")}</div>}
+                  <div className={`service-pill ${system.kg_tool?.enabled ? "ok" : "warn"}`}>KG Tool: {system.kg_tool?.enabled ? "enabled" : "disabled"}</div>
+          {system.llm.models?.length > 0 && !system.llm.models.includes(system.llm.model_name) && <div className="service-pill warn">当前配置模型未在 Ollama 本地模型列表中找到，请检查 .env。</div>}
         </div>
         </>
       )}

@@ -190,3 +190,5 @@ curl -X POST http://127.0.0.1:8000/ask/compare \
 - `.env` 优先级高于 `app/config.py` 默认值。
 - 若 `.env` 中 `EMBEDDING_MODEL` / `RERANK_MODEL` 使用 HuggingFace 在线仓库名，离线环境会失败。
 - 离线运行请改为本地模型路径。
+
+- 注意：`LLM_MODEL_NAME` 必须与 `ollama list` 输出完全一致（例如 `qwen2.5:7b` 与 `qwen2.5:7b-instruct` 不可混用）。
