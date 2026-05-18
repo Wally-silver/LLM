@@ -106,3 +106,45 @@ class CompareResponse(BaseModel):
     rag_latency_ms: int
     latency_diff_ms: int
     rag_retrieval_metrics: RetrievalMetrics | None = None
+
+from datetime import datetime
+
+class ChatSession(BaseModel):
+    id: str
+    title: str
+    created_at: datetime
+    updated_at: datetime
+    message_count: int = 0
+
+
+class ChatMessage(BaseModel):
+    id: str
+    session_id: str
+    role: str
+    content: str
+    mode: str = "chat"
+    created_at: datetime
+    citations: list["Citation"] = Field(default_factory=list)
+    retrieved_docs: list[RetrievedHit] = Field(default_factory=list)
+    retrieval_metrics: RetrievalMetrics | None = None
+    kg_paths: list[dict] = Field(default_factory=list)
+    agent_trace: dict | None = None
+    used_tools: list[str] = Field(default_factory=list)
+    raw: dict = Field(default_factory=dict)
+
+
+class CreateSessionRequest(BaseModel):
+    title: str = "新对话"
+
+
+class RenameSessionRequest(BaseModel):
+    title: str
+
+
+class ChatRequest(BaseModel):
+    session_id: str
+    message: str
+    mode: str = "chat"
+    use_rag: bool = False
+    use_kg: bool = False
+    show_retrieval: bool = True

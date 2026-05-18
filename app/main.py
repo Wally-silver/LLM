@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -24,6 +25,11 @@ from app.schemas import (
     RetrievalMetrics,
     RetrievedHit,
     SourceInfo,
+    ChatSession,
+    ChatMessage,
+    CreateSessionRequest,
+    RenameSessionRequest,
+    ChatRequest,
 )
 from app.services.agent_graph import AgentOrchestrator
 from app.services.cache import CacheService
@@ -39,6 +45,7 @@ from app.services.evaluator import AutoEvaluator, AgentQualityEvaluator
 from app.services.document_store import DocumentStore
 from app.services.runtime_fallback import InMemoryCacheService, InMemorySessionMemory
 from app.services.multi_agent import MultiAgentCoordinator
+from app.services.chat_store import InMemoryChatStore, RedisChatStore
 from app.domain.windows_it_admin import WINDOWS_IT_ADMIN_SOURCES, WINDOWS_IT_ADMIN_TASKS
 from app.domain.advanced_reasoning import (
     ADVANCED_REASONING_DATASET_CATALOG,
@@ -75,6 +82,7 @@ async def lifespan(app: FastAPI):
             ttl_seconds=settings.cache_ttl_seconds,
             lock_seconds=settings.cache_lock_seconds,
         )
+    chat_store = RedisChatStore(redis_client) if redis_available else InMemoryChatStore()
     metrics = Metrics(redis_client if redis_available else None, window_size=settings.metrics_window_size)
     llm = VLLMOpenAIClient(
         settings.openai_compatible_base_url,
@@ -209,6 +217,7 @@ async def lifespan(app: FastAPI):
     app.state.tools = tools
     app.state.agent = agent
     app.state.multi_agent = multi_agent
+    app.state.chat_store = chat_store
     app.state.redis_available = redis_available
     app.state.redis_error = redis_error
 
@@ -290,6 +299,10 @@ def get_agent_quality_evaluator(request: Request) -> AgentQualityEvaluator:
 
 def get_multi_agent(request: Request) -> MultiAgentCoordinator:
     return request.app.state.multi_agent
+
+
+def get_chat_store(request: Request):
+    return request.app.state.chat_store
 
 
 def _build_retrieved_hits(chunks, docs_store: DocumentStore) -> list[RetrievedHit]:
@@ -827,3 +840,68 @@ async def run_agent(
             return JSONResponse(result)
     except Exception as exc:
         raise HTTPException(status_code=500, detail={"code": "AGENT_FAILED", "message": str(exc)}) from exc
+
+
+@app.post("/sessions", response_model=ChatSession)
+async def create_session(req: CreateSessionRequest, store=Depends(get_chat_store)):
+    now = datetime.now(timezone.utc)
+    sid = str(int(now.timestamp()*1000))
+    session = {"id": sid, "title": req.title or "新对话", "created_at": now.isoformat(), "updated_at": now.isoformat(), "message_count": 0}
+    await store.create_session(session)
+    return session
+
+
+@app.get("/sessions")
+async def list_sessions(store=Depends(get_chat_store)):
+    return {"sessions": await store.list_sessions()}
+
+
+@app.get("/sessions/{session_id}")
+async def get_session(session_id: str, store=Depends(get_chat_store)):
+    s = await store.get_session(session_id)
+    if not s:
+        raise HTTPException(status_code=404, detail={"message": "session not found"})
+    return s
+
+
+@app.patch("/sessions/{session_id}")
+async def rename_session(session_id: str, req: RenameSessionRequest, store=Depends(get_chat_store)):
+    s = await store.update_session(session_id, {"title": req.title, "updated_at": datetime.now(timezone.utc).isoformat()})
+    if not s:
+        raise HTTPException(status_code=404, detail={"message": "session not found"})
+    return s
+
+
+@app.delete("/sessions/{session_id}")
+async def delete_session(session_id: str, store=Depends(get_chat_store)):
+    await store.delete_session(session_id)
+    return {"ok": True}
+
+
+@app.post("/chat", response_model=ChatMessage)
+async def chat(req: ChatRequest, store=Depends(get_chat_store), memory=Depends(get_memory), cache=Depends(get_cache), llm: VLLMOpenAIClient = Depends(get_llm), rag: RAGService = Depends(get_rag), kg: KnowledgeGraphService = Depends(get_kg), metrics: Metrics = Depends(get_metrics), docs_store: DocumentStore = Depends(get_docs_store), multi_agent: MultiAgentCoordinator = Depends(get_multi_agent)):
+    user_msg = {"id": str(int(time.time()*1000)), "session_id": req.session_id, "role": "user", "content": req.message, "mode": req.mode, "created_at": datetime.now(timezone.utc).isoformat(), "citations": [], "retrieved_docs": [], "retrieval_metrics": None, "kg_paths": [], "agent_trace": None, "used_tools": [], "raw": {}}
+    await store.add_message(req.session_id, user_msg)
+    session = await store.get_session(req.session_id)
+    if session and session.get("title") == "新对话":
+        await store.update_session(req.session_id, {"title": req.message[:20], "updated_at": datetime.now(timezone.utc).isoformat()})
+
+    if req.mode == "compare":
+        ar = AskRequest(session_id=req.session_id, query=req.message, stream=False, use_rag=True, show_retrieval=req.show_retrieval, use_kg=req.use_kg)
+        out = await ask_compare(ar, llm, rag, kg, memory, metrics, docs_store)
+        content = f"No-RAG: {out.no_rag_answer}\n\nRAG: {out.rag_answer}"
+        assistant = {"id": str(int(time.time()*1000)+1), "session_id": req.session_id, "role": "assistant", "content": content, "mode": req.mode, "created_at": datetime.now(timezone.utc).isoformat(), "citations": [], "retrieved_docs": [x.model_dump() for x in out.retrieved_docs], "retrieval_metrics": out.rag_retrieval_metrics.model_dump() if out.rag_retrieval_metrics else None, "kg_paths": out.kg_hits, "agent_trace": None, "used_tools": [], "raw": out.model_dump()}
+    elif req.mode == "agent":
+        ar = AgentRequest(session_id=req.session_id, query=req.message, stream=False, use_rag=True, show_retrieval=True, use_kg=req.use_kg)
+        out = await run_agent(ar, memory, cache, multi_agent, metrics)
+        payload = json.loads(out.body.decode())
+        assistant = {"id": str(int(time.time()*1000)+1), "session_id": req.session_id, "role": "assistant", "content": payload.get("answer", ""), "mode": req.mode, "created_at": datetime.now(timezone.utc).isoformat(), "citations": [], "retrieved_docs": [], "retrieval_metrics": None, "kg_paths": [], "agent_trace": payload.get("metadata", {}).get("final_state"), "used_tools": payload.get("used_tools", []), "raw": payload}
+    else:
+        use_rag = req.use_rag or req.mode in ["rag", "graph_rag"]
+        use_kg = req.use_kg or req.mode in ["kg", "graph_rag"]
+        ar = AskRequest(session_id=req.session_id, query=req.message, stream=False, use_rag=use_rag, show_retrieval=req.show_retrieval, use_kg=use_kg)
+        out = await _non_stream_answer(ar, memory, cache, llm, rag, kg, docs_store)
+        assistant = {"id": str(int(time.time()*1000)+1), "session_id": req.session_id, "role": "assistant", "content": out.get("answer", ""), "mode": req.mode, "created_at": datetime.now(timezone.utc).isoformat(), "citations": out.get("citations", []), "retrieved_docs": out.get("retrieved_docs", []), "retrieval_metrics": out.get("metadata", {}).get("retrieval_metrics"), "kg_paths": out.get("kg_hits", []), "agent_trace": None, "used_tools": out.get("used_tools", []), "raw": out}
+
+    await store.add_message(req.session_id, assistant)
+    return assistant
